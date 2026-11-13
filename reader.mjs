@@ -33,37 +33,6 @@ function level(text, i) {
   return false;
 }
 
-// Lower-case round letters are about as wide as tall in ordinary fonts.
-function scaled(tight) {
-  const byRun = new Map();
-  for (let i = 0; i < tight.count; i++) {
-    const width = tight.boxes[4 * i + 2];
-    const height = tight.boxes[4 * i + 3];
-    // A face designed wide or narrow is not scaled text.
-    const designed =
-      /(Ext|Extended|Expanded|Wide|Cond|Condensed|Narrow|Compressed)(?![a-z])/.test(
-        tight.fonts[tight.fontIds[i]]?.name ?? ""
-      );
-    if (
-      height > 0 &&
-      !designed &&
-      "oec".includes(String.fromCodePoint(tight.codepoints[i]))
-    ) {
-      const list = byRun.get(tight.runIds[i]) ?? [];
-      list.push(width / height);
-      byRun.set(tight.runIds[i], list);
-    }
-  }
-  for (const ratios of byRun.values()) {
-    ratios.sort((a, b) => a - b);
-    const median = ratios[ratios.length >> 1];
-    if (ratios.length >= 3 && (median < 0.6 || median > 1.25)) {
-      return true;
-    }
-  }
-  return false;
-}
-
 const touching = (a, b, pad) =>
   a.x <= b.x + b.width + pad &&
   b.x <= a.x + a.width + pad &&
@@ -151,30 +120,42 @@ function clip(info, b) {
 }
 
 // A region render's pixels are the whole-page render's at the same scale
-// (Recto's contract), and in Recto 0.7 it costs about as much, so a page with
-// several regions renders once and crops. One region renders alone.
+// (Recto's contract), and it costs about as much, so a page with several
+// regions renders once and crops. One region renders alone. Images and art
+// render without the page's text, which Word draws over them as text; only a
+// region of characters kept as an image (box.text) renders with it.
 function pageImages(pdf, pageIndex, info, boxes) {
   const options = {
     maxHeight: 2048,
     width: Math.min(2048, Math.ceil(info.width * 1.5)),
   };
-  if (boxes.length < 2) {
-    return boxes.map((box) => ({
+  const withText = boxes.filter((b) => b.text).length;
+  const counts = { true: withText, false: boxes.length - withText };
+  const pages = {};
+  return boxes.map(({ text, ...box }) => {
+    const opts = { ...options, text };
+    if (counts[text] < 2) {
+      const bitmap = pdf.render(pageIndex, { ...opts, region: box });
+      return { ...box, png: png(bitmap), truncated: bitmap.truncated };
+    }
+    pages[text] ??= pdf.render(pageIndex, opts);
+    return {
       ...box,
-      png: png(pdf.render(pageIndex, { ...options, region: box })),
-    }));
-  }
-  const page = pdf.render(pageIndex, options);
+      png: png(cropped(pages[text], info, box)),
+      truncated: pages[text].truncated,
+    };
+  });
+}
+
+function cropped(page, info, box) {
   const sx = page.width / info.width;
   const sy = page.height / info.height;
-  return boxes.map((box) => {
-    const x = Math.floor(box.x * sx);
-    const y = Math.floor(box.y * sy);
-    const width = Math.min(page.width, Math.ceil((box.x + box.width) * sx)) - x;
-    const height =
-      Math.min(page.height, Math.ceil((box.y + box.height) * sy)) - y;
-    return { ...box, png: png(crop(page, x, y, width, height)) };
-  });
+  const x = Math.floor(box.x * sx);
+  const y = Math.floor(box.y * sy);
+  const width = Math.min(page.width, Math.ceil((box.x + box.width) * sx)) - x;
+  const height =
+    Math.min(page.height, Math.ceil((box.y + box.height) * sy)) - y;
+  return crop(page, x, y, width, height);
 }
 
 function crop(bitmap, x, y, width, height) {
@@ -183,7 +164,7 @@ function crop(bitmap, x, y, width, height) {
     const start = ((y + row) * bitmap.width + x) * 4;
     rgba.set(bitmap.rgba.subarray(start, start + width * 4), row * width * 4);
   }
-  return { width, height, rgba, truncated: bitmap.truncated };
+  return { width, height, rgba };
 }
 
 // Controls XML cannot carry (tab, newline and return can).
@@ -193,9 +174,6 @@ const unsafe = (c) =>
   c === 0xff_ff;
 
 function png(bitmap) {
-  if (bitmap.truncated) {
-    throw new Error("image render truncated");
-  }
   // Recto's bitmaps are opaque: RGB, with PNG's Up filter (each byte less
   // the one above it), which turns the rows of a rendered page into runs of
   // zeros that deflate at a fast level squeezes well.
@@ -244,13 +222,21 @@ try {
   // only when emitted, and scans wait while every page so far is one: an
   // all-scan document is refused without encoding a page.
   const waiting = [];
-  const emit = ({ info, pageIndex, images, ...rest }) =>
+  const emit = ({ info, pageIndex, images, warnings, ...rest }) => {
+    const rendered = pageImages(doc, pageIndex, info, images);
+    // Past Recto's render limits (more than 32 knockout groups) the rest
+    // draw as if isolated: close, not exact.
+    if (rendered.some((r) => r.truncated)) {
+      warnings.push("Some images are approximate: too many layered effects");
+    }
     say({
       width: info.width,
       height: info.height,
       ...rest,
-      images: pageImages(doc, pageIndex, info, images),
+      warnings,
+      images: rendered.map(({ truncated, ...image }) => image),
     });
+  };
   for (let pageIndex = 0; pageIndex < doc.pageCount; pageIndex++) {
     const info = doc.pageInfo(pageIndex);
     // Angles are in the content frame; /Rotate turns the page clockwise for
@@ -287,8 +273,11 @@ try {
         (tilted(text.angles[i]) && !level(text, i))
       ) {
         const [x, y, width, height] = text.boxes.subarray(4 * i, 4 * i + 4);
-        if (width > 0 && height > 0) {
-          raster.push({ x, y, width, height });
+        // Clipped first: a glyph box miles off the page would span millions
+        // of cluster grid cells.
+        const box = clip(info, { x, y, width, height });
+        if (box) {
+          raster.push(box);
         }
         last = undefined;
         continue;
@@ -312,11 +301,38 @@ try {
       if (text.flags[i] & 1) {
         continue;
       }
-      const [x, y, width, height] = text.boxes.subarray(4 * i, 4 * i + 4);
+      const [boxX, y, boxWidth, height] = text.boxes.subarray(4 * i, 4 * i + 4);
+      let x = boxX;
+      let width = boxWidth;
       if (!value.trim() && (!last || width <= 0)) {
         continue;
       }
       const run = text.runIds[i];
+      // A ligature's letters ("f", "i" of "ﬁ") share one glyph's box: one
+      // glyph, its text both letters.
+      if (
+        last &&
+        run >= 0 &&
+        run === text.runIds[i - 1] &&
+        boxX === text.boxes[4 * (i - 1)] &&
+        boxWidth === text.boxes[4 * (i - 1) + 2]
+      ) {
+        last.text += value;
+        continue;
+      }
+      if (run >= 0) {
+        // A slant drawn with the text matrix (faux italic) widens each box
+        // by its height times the shear; the advance is the box less that.
+        // Up in text space is (c, d) in the viewer frame, where up is -y.
+        const [a, b, c, d] = text.runs.matrices.subarray(6 * run, 6 * run + 4);
+        const shear = d < 0 && Math.abs(b) < 1e-3 * Math.abs(a) ? c / -d : 0;
+        if (Math.abs(shear) > 0.01) {
+          if (shear < 0) {
+            x += height * -shear; // leaning left: the box starts at the top
+          }
+          width = Math.max(0, width - height * Math.abs(shear));
+        }
+      }
       const font = fonts[text.fontIds[i]];
       const baseline = run >= 0 ? text.runs.origins[run * 2 + 1] : y + height;
       const target = links.find(
@@ -351,7 +367,6 @@ try {
         baseline,
         size,
         font: font?.name ?? "Arial",
-        descent: -(font?.descent ?? -0.2),
         weight: font?.weight ?? 400,
         // A slant drawn with the text matrix (faux italic) reads as a small
         // angle on glyphs that still advance along one baseline.
@@ -360,6 +375,9 @@ try {
         mono: !!(font?.flags & 1),
         color,
         link,
+        // Tz as Word's character scale, in percent (a mirroring negative Tz
+        // keeps its width).
+        scale: Math.round(Math.abs(text.hScales[i]) * 100),
       };
       glyphs.push(last);
     }
@@ -367,13 +385,13 @@ try {
       a &&
       b &&
       a.font === b.font &&
-      a.descent === b.descent &&
       Math.abs(a.size - b.size) < 0.01 &&
       Math.abs(a.baseline - b.baseline) < 0.2 &&
       a.color === b.color &&
       a.link === b.link &&
       a.weight === b.weight &&
-      a.italic === b.italic;
+      a.italic === b.italic &&
+      a.scale === b.scale;
     // Boxes carry advances, not tight ink widths. Keep the extra source
     // advance as ordinary Word tracking, which survives edits and rendering.
     for (let i = 0; i < glyphs.length; i++) {
@@ -390,7 +408,16 @@ try {
     }
     const spans = [];
     last = undefined;
+    let tabbed; // the baseline of a tab just drawn
     for (const g of glyphs) {
+      // A drawn tab ends its span: the next text starts at its own x, which
+      // Word reaches with a tab stop (a tab character would go to Word's
+      // default stops instead).
+      if (g.text === "\t") {
+        tabbed = g.baseline;
+        last = undefined;
+        continue;
+      }
       // A drawn space belongs to the span before it on the same line, even
       // across a style change: a span of only a space would be dropped, and
       // overlapping slanted boxes leave no gap to infer it from.
@@ -412,9 +439,11 @@ try {
         last.advance += g.width;
         last.count++;
       } else {
-        last = { ...g, advance: g.width, count: 1 };
+        const tab = tabbed !== undefined && Math.abs(tabbed - g.baseline) < 0.5;
+        last = { ...g, advance: g.width, count: 1, tab };
         spans.push(last);
       }
+      tabbed = undefined;
     }
     for (const s of spans) {
       delete s.advance;
@@ -462,11 +491,10 @@ try {
       }
     }
     const images = [];
-    let overlap = false;
-    const addImage = (b) => {
+    const addImage = (b, withText = false) => {
       const box = clip(info, b);
       if (box) {
-        images.push(box);
+        images.push({ ...box, text: withText });
       }
     };
     const placed = [];
@@ -498,23 +526,12 @@ try {
         continue;
       }
       kept.push(box);
-      if (
-        spans.some(
-          (s) =>
-            s.text.trim() &&
-            Math.min(s.x + s.width, x + width) - Math.max(s.x, x) > 1 &&
-            Math.min(s.y + s.height, y + height) - Math.max(s.y, y) > 1
-        )
-      ) {
-        // Recto renders a region with the text drawn over it.
-        overlap = true;
-      }
       addImage(box);
     }
-    // Vector art that touches no text keeps its look as an image: rules,
-    // logos, signature lines. Recto exposes no path colours, and a region
-    // render includes text drawn over it, so art under text is left out
-    // (ruled tables are rebuilt as Word tables from their segments).
+    // Vector art keeps its look as an image rendered without the page's
+    // text: rules, logos, signature lines, and fills under text (shaded
+    // cells, panels). Thin art under text is left out: ruled tables and
+    // underlines are rebuilt in Word from their segments.
     // A page fill, or a panel behind all of the page's text, is background
     // (usually white), not art.
     const backdrop = (b) =>
@@ -562,8 +579,8 @@ try {
           Math.min(s.x + s.width, b.x + b.width) > Math.max(s.x, b.x) &&
           Math.min(s.y + s.height, b.y + b.height) > Math.max(s.y, b.y)
       );
-    let skippedArt = art.some((b) => b.thick && underText(b));
-    art.splice(0, art.length, ...art.filter((b) => !underText(b)));
+    let skippedArt = false;
+    art.splice(0, art.length, ...art.filter((b) => b.thick || !underText(b)));
     const artRoom = Math.min(50, 100 - images.length);
     if (art.length > artRoom) {
       art.sort((a, b) => b.width * b.height - a.width * a.height);
@@ -576,9 +593,10 @@ try {
     const regions = clusters(raster, 2) ?? ((dense = true), []);
     leftOut += Math.max(0, images.length + regions.length - 100);
     for (const r of regions.slice(0, Math.max(0, 100 - images.length))) {
-      addImage(r);
+      addImage(r, true);
     }
-    const crowded = leftOut > 0 || dense || pathCount < objects.paths.count;
+    const crowded =
+      leftOut > 0 || dense || skippedArt || pathCount < objects.paths.count;
     const warnings = [];
     if (crowded) {
       warnings.push(
@@ -595,11 +613,6 @@ try {
         "Links other than web, mail and page links keep their text without the link"
       );
     }
-    if (overlap) {
-      warnings.push(
-        "Images under text are rendered with that text; check for doubled glyphs"
-      );
-    }
     if (
       spans.some((s) =>
         /[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/u.test(s.text)
@@ -607,37 +620,18 @@ try {
     ) {
       warnings.push("CJK text and font fidelity require manual review");
     }
+    // An annotation's appearance (a stamped signature, a filled field) keeps
+    // its look as an image: without the page's text, unless the appearance
+    // draws text of its own.
+    const shown = annotations.filter(
+      (a) => a.subtype !== 2 && a.appearanceObjects > 0
+    );
+    for (const a of shown.slice(0, Math.max(0, 100 - images.length))) {
+      addImage(a.box, a.appearanceTextObjects > 0);
+    }
     if (annotations.some((a) => a.subtype !== 2)) {
       warnings.push(
-        "PDF annotations/forms are not converted to Word comments or fields"
-      );
-    }
-    if (skippedArt) {
-      warnings.push(
-        "Vector artwork under text is not reproduced; ruled tables are rebuilt from their grid"
-      );
-    }
-    // Recto does not expose horizontal scaling (Tz). An unusual average
-    // advance nominates the page; round letters' outline aspect, which
-    // scaling stretches and font design barely moves, confirms it.
-    // Measured over runs of same-style letters: spaces and digits have their
-    // own widths.
-    let nominated = false;
-    for (let ems = 0, i = 0, start = 0; i <= glyphs.length; i++) {
-      const g = glyphs[i];
-      const letter = g && /^\p{L}$/u.test(g.text);
-      if (letter && i > start && sameStyle(glyphs[start], g)) {
-        ems += g.width / g.size;
-        continue;
-      }
-      const n = i - start;
-      nominated ||= n >= 8 && (ems / n < 0.38 || ems / n > 0.6);
-      start = letter ? i : i + 1;
-      ems = letter ? g.width / g.size : 0;
-    }
-    if (nominated && scaled(doc.text(pageIndex, { boxes: "tight" }))) {
-      warnings.push(
-        "Horizontally scaled text: Word shows it at its normal width; check widths in the review copy"
+        "PDF annotations and form fields are kept as images, not Word comments or fields"
       );
     }
     if (objects.images.count && !spans.some((s) => s.text.trim())) {

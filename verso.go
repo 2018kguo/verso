@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -149,10 +150,13 @@ func (b *cappedBuffer) Write(p []byte) (int, error) {
 	return n, nil
 }
 
+// The Recto releases reader.mjs runs on: 0.8.2 or a later 0.8 release, for
+// per-glyph horizontal scales and renders of art without the page's text.
+var rectoVersion = regexp.MustCompile(`^0\.8\.([2-9]|[1-9][0-9]+)(?:[-+].*)?$`)
+
 // FindRecto locates the Recto decoder: $VERSO_RECTO_MODULE, the nearest
 // node_modules above this executable, then the global npm root. Never the
 // working directory: a converter run inside an upload must not load its code.
-// The module must be the Recto 0.8 line that reader.mjs is written against.
 func FindRecto() (string, error) {
 	rel := filepath.Join("node_modules", "@2018kguo", "recto", "dist", "index.js")
 	var candidates []string
@@ -178,11 +182,11 @@ func FindRecto() (string, error) {
 			continue
 		}
 		var pkg struct{ Name, Version string }
-		if json.Unmarshal(data, &pkg) == nil && pkg.Name == "@2018kguo/recto" && strings.HasPrefix(pkg.Version, "0.8.") {
+		if json.Unmarshal(data, &pkg) == nil && pkg.Name == "@2018kguo/recto" && rectoVersion.MatchString(pkg.Version) {
 			return m, nil
 		}
 	}
-	return "", errors.New("Recto 0.8 not found: npm install -g @2018kguo/recto@0.8, or pass its dist/index.js")
+	return "", errors.New("Recto 0.8.2+ not found: npm install -g @2018kguo/recto@0.8, or pass its dist/index.js")
 }
 
 // Convert publishes only bytes that passed the validator. A same-filesystem

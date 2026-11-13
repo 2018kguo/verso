@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+	"maps"
 	"math"
 	"regexp"
 	"slices"
@@ -47,6 +48,8 @@ func fontName(s string) string {
 		family = "Arial"
 	case "Times":
 		family = "Times New Roman"
+	case "Courier":
+		family = "Courier New"
 	}
 	if !strings.Contains(family, " ") {
 		family = camel.ReplaceAllString(family, "$1 $2")
@@ -62,9 +65,6 @@ func fontName(s string) string {
 	}
 	if r := []rune(family); len(r) > 31 { // ST_String limit for w:rFonts
 		family = strings.TrimSpace(string(r[:31]))
-	}
-	if a, ok := fontAliases[fontKey(family)]; ok {
-		family = a[0]
 	}
 	return family
 }
@@ -88,9 +88,6 @@ func (w *writer) fontTable() string {
 		case s.Serif:
 			alt, family = "Times New Roman", "roman"
 		}
-		if a, ok := fontAliases[fontKey(name)]; ok {
-			alt = a[1]
-		}
 		fmt.Fprintf(&b, `<w:font w:name="%s">`, esc(name))
 		if alt != name {
 			fmt.Fprintf(&b, `<w:altName w:val="%s"/>`, esc(alt))
@@ -101,18 +98,15 @@ func (w *writer) fontTable() string {
 	return b.String()
 }
 
-// Fonts PDFs often carry that Word may not have: the family's own name and an
-// Office font with near-identical metrics, for fontTable.xml's altName.
-var fontAliases = map[string][2]string{
-	"dejavusans": {"DejaVu Sans", "Verdana"}, "dejavuserif": {"DejaVu Serif", "Georgia"},
-	"dejavusansmono": {"DejaVu Sans Mono", "Courier New"}, "bitstreamverasans": {"Bitstream Vera Sans", "Verdana"},
-	"liberationsans": {"Liberation Sans", "Arial"}, "liberationserif": {"Liberation Serif", "Times New Roman"},
-	"liberationmono": {"Liberation Mono", "Courier New"}, "arimo": {"Arimo", "Arial"}, "tinos": {"Tinos", "Times New Roman"},
-	"cousine": {"Cousine", "Courier New"}, "carlito": {"Carlito", "Calibri"}, "caladea": {"Caladea", "Cambria"},
-	"nimbussans": {"Nimbus Sans", "Arial"}, "nimbussansl": {"Nimbus Sans L", "Arial"}, "nimbusroman": {"Nimbus Roman", "Times New Roman"},
-	"nimbusromanno9l": {"Nimbus Roman No9 L", "Times New Roman"}, "nimbusmono": {"Nimbus Mono", "Courier New"},
-	"freesans": {"FreeSans", "Arial"}, "freeserif": {"FreeSerif", "Times New Roman"}, "freemono": {"FreeMono", "Courier New"},
-	"helveticaneue": {"Helvetica Neue", "Arial"}, "notosans": {"Noto Sans", "Arial"}, "notoserif": {"Noto Serif", "Times New Roman"},
+// Fonts PDFs often carry that Word may not have, and the Office font with
+// near-identical metrics Word lays each out in.
+var fontAliases = map[string]string{
+	"dejavusansmono": "Courier New", "liberationsans": "Arial", "liberationserif": "Times New Roman",
+	"liberationmono": "Courier New", "arimo": "Arial", "tinos": "Times New Roman", "cousine": "Courier New",
+	"carlito": "Calibri", "caladea": "Cambria", "nimbussans": "Arial", "nimbussansl": "Arial",
+	"nimbusroman": "Times New Roman", "nimbusromanno9l": "Times New Roman", "nimbusmono": "Courier New",
+	"freesans": "Arial", "freeserif": "Times New Roman", "freemono": "Courier New", "helveticaneue": "Arial",
+	"notosans": "Arial", "notoserif": "Times New Roman",
 }
 
 func fontKey(s string) string {
@@ -129,6 +123,7 @@ type writer struct {
 	files      map[string][]byte
 	next       int
 	fonts      map[string]Span // family -> a span drawn in it, for its flags
+	justified  bool            // writing a line justification stretches
 }
 
 func (w *writer) relationship(kind, target string, external bool) string {
@@ -150,7 +145,11 @@ func (w *writer) span(b *strings.Builder, s Span) {
 			fmt.Fprintf(b, `<w:hyperlink r:id="%s">`, id)
 		}
 	}
-	family := fontName(s.Font)
+	family := wordFamily(s)
+	scale, tracking := s.Scale, s.Tracking
+	if fit, t, ok := wordFit(s, family, w.justified); ok {
+		scale, tracking = fit, t // the source width in Word's metrics, Tz included
+	}
 	if _, ok := w.fonts[family]; !ok {
 		w.fonts[family] = s
 	}
@@ -171,14 +170,25 @@ func (w *writer) span(b *strings.Builder, s Span) {
 		color = "000000"
 	}
 	fmt.Fprintf(b, `<w:color w:val="%s"/>`, esc(color))
-	if t := twips(s.Tracking); t != 0 {
+	t := twips(tracking)
+	if over := (float64(t)/20 - tracking) * float64(utf8.RuneCountInString(s.Text)-1); w.justified && over > 0.25 {
+		// Rounded to zero, -0.015pt a character overfilled a full line by
+		// a point and Word wrapped its last word; justification restretches
+		// a line set narrower (but a line of word runs each set narrower
+		// pulled the next line's first word up).
+		t = int(math.Floor(tracking * 20))
+	}
+	if t != 0 {
 		fmt.Fprintf(b, `<w:spacing w:val="%d"/>`, t)
 	}
-	// Schema order: color, spacing, position, sz, szCs, u.
+	if scale != 0 && scale != 100 {
+		fmt.Fprintf(b, `<w:w w:val="%d"/>`, min(600, max(1, scale)))
+	}
+	// Schema order: color, spacing, w, position, sz, szCs, u.
 	if rise := int(math.Round(s.Rise * 2)); rise != 0 {
 		fmt.Fprintf(b, `<w:position w:val="%d"/>`, rise)
 	}
-	fmt.Fprintf(b, `<w:sz w:val="%d"/><w:szCs w:val="%d"/>`, max(1, int(math.Round(s.Size*2))), max(1, int(math.Round(s.Size*2))))
+	fmt.Fprintf(b, `<w:sz w:val="%d"/><w:szCs w:val="%d"/>`, halfPoints(s.Size), halfPoints(s.Size))
 	if s.Link != "" || s.Underline {
 		b.WriteString(`<w:u w:val="single"/>`)
 	}
@@ -211,7 +221,21 @@ func gap(prev, s Span) float64 { return s.X - (prev.X + prev.Width) }
 func tabbed(l Line, i int) bool {
 	prev, s := l.Spans[i-1], l.Spans[i]
 	g := gap(prev, s)
-	return g > math.Max(18, s.Size*2) || i == 1 && g > 0.6*s.Size && isMarker(prev.Text)
+	// After a line's first word a gap wider than a space and than the line's
+	// other word gaps is a tab: "3⇥Heading", "1⇥Entry ....... 4". Justification
+	// stretches every gap alike, so one as wide as the rest is a space.
+	return s.Tab || s.Leader || g > math.Max(18, s.Size*2) || i == 1 && (g > 0.6*s.Size && isMarker(prev.Text) || g > 0.9*s.Size && widest(l, g))
+}
+
+// widest reports whether gap g after a line's first span is clearly wider
+// than every later gap between its spans but a leader's (a tab of its own).
+func widest(l Line, g float64) bool {
+	for j := 2; j < len(l.Spans); j++ {
+		if !l.Spans[j].Leader && gap(l.Spans[j-1], l.Spans[j]) > g/1.5 {
+			return false
+		}
+	}
+	return true
 }
 
 // runs writes one source line: spans, the spaces the PDF drew as gaps, and
@@ -223,9 +247,11 @@ func (w *writer) runs(b *strings.Builder, l Line) {
 			if tabbed(l, i) {
 				b.WriteString(`<w:r><w:tab/></w:r>`)
 			} else if l.needsSpace(i) {
+				// A space as wide as the source's gap: typesetters shrink and
+				// stretch word gaps, and Word's own space would rewrap the line.
 				space := previous
-				space.Text = " "
-				space.Tracking = 0
+				space.Text, space.Width = " ", 0
+				space.Tracking = gap(previous, s) - spaceWidth(previous)
 				if space.Link != s.Link {
 					space.Link = ""
 				}
@@ -238,27 +264,35 @@ func (w *writer) runs(b *strings.Builder, l Line) {
 
 // Tab stops are measured from the text column's left edge (origin).
 func tabStops(lines []Line, origin float64) string {
-	var tabs strings.Builder
-	seen := map[int]bool{}
+	stops := map[int]string{} // position -> the stop's markup
 	for _, l := range lines {
 		for i, s := range l.Spans {
-			if i > 0 && tabbed(l, i) && !seen[twips(s.X-origin)] {
-				seen[twips(s.X-origin)] = true
-				fmt.Fprintf(&tabs, `<w:tab w:val="left" w:pos="%d"/>`, twips(s.X-origin))
+			switch {
+			case i == 0 || !tabbed(l, i):
+			case s.Leader:
+				pos := twips(s.X + s.Width - origin)
+				stops[pos] = fmt.Sprintf(`<w:tab w:val="right" w:leader="dot" w:pos="%d"/>`, pos)
+			case stops[twips(s.X-origin)] == "":
+				stops[twips(s.X-origin)] = fmt.Sprintf(`<w:tab w:val="left" w:pos="%d"/>`, twips(s.X-origin))
 			}
 		}
 	}
-	if tabs.Len() == 0 {
+	if len(stops) == 0 {
 		return ""
 	}
-	return `<w:tabs>` + tabs.String() + `</w:tabs>`
+	var tabs strings.Builder
+	tabs.WriteString(`<w:tabs>`)
+	for _, pos := range slices.Sorted(maps.Keys(stops)) {
+		tabs.WriteString(stops[pos])
+	}
+	return tabs.String() + `</w:tabs>`
 }
 
 // frame writes one line at its source position: the fallback for text that
 // overlaps a ruled table or another column.
 func (w *writer) frame(l Line, pageWidth float64) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, `<w:p><w:pPr><w:framePr w:w="%d" w:h="%d" w:wrap="none" w:vAnchor="page" w:hAnchor="page" w:x="%d" w:y="%d" w:hRule="atLeast"/>`, max(1, twips(pageWidth-l.X)), max(1, twips(l.Height+1)), twips(l.X), twips(l.Y))
+	fmt.Fprintf(&b, `<w:p><w:pPr><w:framePr w:w="%d" w:h="%d" w:wrap="none" w:vAnchor="page" w:hAnchor="page" w:x="%d" w:y="%d" w:hRule="atLeast"/>`, max(1, twips(pageWidth-l.X)), max(1, twips(l.Height+1)), twips(l.X), twips(l.Baseline-baselineDepth(l.Height)))
 	b.WriteString(tabStops([]Line{l}, l.X))
 	fmt.Fprintf(&b, `<w:spacing w:before="0" w:after="0" w:line="%d" w:lineRule="exact"/><w:ind w:left="0" w:right="0"/><w:jc w:val="left"/></w:pPr>`, max(1, twips(l.Height)))
 	w.runs(&b, l)
@@ -270,28 +304,26 @@ func (w *writer) frame(l Line, pageWidth float64) string {
 // paragraph spacing of its own and moves source lines to other pages.
 const styles = declaration + `<w:styles xmlns:w="` + word + `"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:eastAsia="Arial" w:cs="Arial"/><w:sz w:val="20"/><w:szCs w:val="20"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:widowControl w:val="0"/><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="table" w:default="1" w:styleId="TableNormal"><w:name w:val="Normal Table"/><w:tblPr><w:tblCellMar><w:top w:w="0" w:type="dxa"/><w:left w:w="0" w:type="dxa"/><w:bottom w:w="0" w:type="dxa"/><w:right w:w="0" w:type="dxa"/></w:tblCellMar></w:tblPr></w:style></w:styles>`
 
-// descent is where Word puts an exact-spaced line's baseline: this far above
-// the line box's bottom, the font's own descent when the PDF states one.
-func descent(l Line) float64 {
-	s := l.Spans[0]
-	for _, t := range l.Spans {
-		if t.Size > s.Size {
-			s = t
-		}
-	}
-	d := s.Descent
-	if d < 0.1 || d > 0.5 {
-		d = 0.22
-	}
-	return d * s.Size
-}
+// Word puts an exact-spaced line's baseline this share of the line's height
+// below its top, in every font and at every height (measured in Word for Mac
+// across Arial, Times New Roman, Courier New and Calibri, 15pt to 42pt lines
+// of 14pt text).
+const baselineShare = 0.8
+
+func baselineDepth(height float64) float64 { return baselineShare * height }
 
 // flow writes a paragraph into the column [origin, wrap] starting below
 // cursor, and returns the new cursor. Positions are page points; Word sees
 // only twips, so the cursor follows the rounded values it will lay out.
 func (w *writer) flow(b *strings.Builder, p Paragraph, origin, wrap, cursor float64) float64 {
 	pitch := float64(max(1, twips(p.Pitch))) / 20
-	top := p.Lines[0].Baseline - (pitch - descent(p.Lines[0]))
+	// One line's pitch is a guess (1.2 times its size); where the line above
+	// ends closer than that (tight display leading), the guess would push it
+	// and everything after it down the page, so the line takes the room it has.
+	if room := (p.Lines[0].Baseline - cursor) / baselineShare; len(p.Lines) == 1 && room < pitch {
+		pitch = float64(max(1, twips(math.Max(room, 0.75*p.Lines[0].size())))) / 20
+	}
+	top := p.Lines[0].Baseline - baselineDepth(pitch)
 	before := float64(max(0, twips(top-cursor))) / 20
 	left := max(0, twips(p.Left-origin))
 	b.WriteString(`<w:p><w:pPr>`)
@@ -306,12 +338,14 @@ func (w *writer) flow(b *strings.Builder, p Paragraph, origin, wrap, cursor floa
 	}
 	fmt.Fprintf(b, `<w:ind w:left="%d" w:right="%d"%s/><w:jc w:val="%s"/></w:pPr>`, left, max(0, twips(wrap-p.Right)), indent, p.Align)
 	for i, l := range p.Lines {
+		// Justification stretches every line but the last.
+		w.justified = p.Align == "both" && i < len(p.Lines)-1
 		if i > 0 {
 			prev := p.Lines[i-1].Spans
 			last := prev[len(prev)-1]
 			if !strings.HasSuffix(last.Text, " ") && !strings.HasSuffix(last.Text, "-") && !strings.HasSuffix(last.Text, "\u00ad") {
 				space := last
-				space.Text, space.Tracking = " ", 0
+				space.Text, space.Width, space.Tracking = " ", 0, 0
 				if space.Link != l.Spans[0].Link {
 					space.Link = ""
 				}
@@ -320,6 +354,7 @@ func (w *writer) flow(b *strings.Builder, p Paragraph, origin, wrap, cursor floa
 		}
 		w.runs(b, l)
 	}
+	w.justified = false
 	b.WriteString(`</w:p>`)
 	return cursor + before + pitch*float64(len(p.Lines))
 }
@@ -451,6 +486,22 @@ func write(ctx context.Context, dst io.Writer, pages []Page) (report Report, err
 		}
 		fmt.Fprintf(&w.body, `<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="1" w:lineRule="exact"/></w:pPr><w:bookmarkStart w:id="%d" w:name="page%d"/><w:bookmarkEnd w:id="%d"/></w:p>`, i, i+1, i)
 		cursor := 0.0
+		// A page's images anchor to one hairline paragraph at its top: they
+		// sit at page positions, and a paragraph each at the page's end took
+		// a line each and spilled full pages onto a new one.
+		if len(l.Images) > 0 {
+			w.body.WriteString(`<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="1" w:lineRule="exact"/><w:rPr><w:sz w:val="1"/></w:rPr></w:pPr>`)
+			for j, im := range l.Images {
+				name := fmt.Sprintf("media/page%d-image%d.png", i+1, j+1)
+				w.files["word/"+name] = im.PNG
+				id := w.relationship("image", name, false)
+				w.next++
+				shape := w.next
+				cx, cy := int64(math.Round(im.Width*12700)), int64(math.Round(im.Height*12700))
+				fmt.Fprintf(&w.body, `<w:r><w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="0" behindDoc="1" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="page"><wp:posOffset>%d</wp:posOffset></wp:positionH><wp:positionV relativeFrom="page"><wp:posOffset>%d</wp:posOffset></wp:positionV><wp:extent cx="%d" cy="%d"/><wp:wrapNone/><wp:docPr id="%d" name="Image %d"/><wp:cNvGraphicFramePr/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="%d" name="Image %d"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="%s"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="%d" cy="%d"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>`, int64(math.Round(im.X*12700)), int64(math.Round(im.Y*12700)), cx, cy, shape, shape, shape, shape, id, cx, cy)
+			}
+			w.body.WriteString(`</w:p>`)
+		}
 		for _, it := range l.Items {
 			switch {
 			case it.Block != nil:
@@ -469,15 +520,6 @@ func write(ctx context.Context, dst io.Writer, pages []Page) (report Report, err
 					w.body.WriteString(w.frame(line, p.Width))
 				}
 			}
-		}
-		for j, im := range l.Images {
-			name := fmt.Sprintf("media/page%d-image%d.png", i+1, j+1)
-			w.files["word/"+name] = im.PNG
-			id := w.relationship("image", name, false)
-			w.next++
-			shape := w.next
-			cx, cy := int64(math.Round(im.Width*12700)), int64(math.Round(im.Height*12700))
-			fmt.Fprintf(&w.body, `<w:p><w:r><w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="0" behindDoc="1" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="page"><wp:posOffset>%d</wp:posOffset></wp:positionH><wp:positionV relativeFrom="page"><wp:posOffset>%d</wp:posOffset></wp:positionV><wp:extent cx="%d" cy="%d"/><wp:wrapNone/><wp:docPr id="%d" name="Image %d"/><wp:cNvGraphicFramePr/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="%d" name="Image %d"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="%s"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="%d" cy="%d"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r></w:p>`, int64(math.Round(im.X*12700)), int64(math.Round(im.Y*12700)), cx, cy, shape, shape, shape, shape, id, cx, cy)
 		}
 		// Only the first section sets where page numbering starts.
 		start := -1

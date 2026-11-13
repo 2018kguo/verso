@@ -399,8 +399,8 @@ func TestPublicationAndRefusal(t *testing.T) {
 				opts.Validate = func(_ context.Context, p string) error { return os.WriteFile(p, []byte("changed"), 0600) }
 			case "warnings":
 				opts.AllowWarnings = false
-				source = filepath.Join(dir, "scaled.pdf")
-				fixturePDF(t, source, 1, false, func(c string) string { return strings.ReplaceAll(c, "Td (Review", "Td 150 Tz (Review") })
+				source = filepath.Join(dir, "rotated.pdf")
+				fixturePDF(t, source, 1, false, func(c string) string { return c + "BT /F1 12 Tf 0 1 -1 0 300 300 Tm (Rotated) Tj ET\n" })
 			case "page limit":
 				opts.MaxPages = 1
 			case "byte limit":
@@ -556,7 +556,9 @@ func TestRenderedPaymentGeometry(t *testing.T) {
 	}
 }
 
-func TestTextTransformsRequireReview(t *testing.T) {
+// Horizontal scaling (Tz) is Word's character scale: published without
+// review, and restored with the graphics state.
+func TestHorizontalScaleIsCharacterScale(t *testing.T) {
 	opts := integrationOptions(t)
 	opts.AllowWarnings = false
 	for _, scale := range []int{50, 100, 150} {
@@ -564,27 +566,21 @@ func TestTextTransformsRequireReview(t *testing.T) {
 			dir := t.TempDir()
 			input, output := filepath.Join(dir, "scaled.pdf"), filepath.Join(dir, "scaled.docx")
 			fixturePDF(t, input, 1, false, func(_ string) string {
-				return fmt.Sprintf("BT /F1 12 Tf 50 740 Td %d Tz (Horizontal scaling needs review.) Tj ET\n", scale)
+				return fmt.Sprintf("q BT /F1 12 Tf 50 740 Td %d Tz (Horizontal scaling) Tj ET Q\nBT /F1 12 Tf 50 700 Td (Restored width) Tj ET\n", scale)
 			})
 			report, err := Convert(context.Background(), input, output, opts)
-			if scale == 100 {
-				if err != nil || len(report.Warnings) > 0 {
-					t.Fatalf("plain text needs no review: %+v %v", report, err)
-				}
-				return
+			if err != nil || len(report.Warnings) > 0 {
+				t.Fatalf("%+v %v", report, err)
 			}
-			if err == nil || !strings.Contains(strings.Join(report.Warnings, " "), "Horizontally scaled") {
-				t.Fatalf("unchecked text transform published: scale=%d report=%+v error=%v", scale, report, err)
-			}
-			if _, err := os.Stat(output); !os.IsNotExist(err) {
-				t.Fatal("review refusal left output")
+			doc := docParts(t, mustRead(t, output))["word/document.xml"]
+			scaled, restored, _ := strings.Cut(doc, "Restored width")
+			restored = scaled[strings.LastIndex(scaled, "<w:rPr>"):]
+			if strings.Contains(restored, "<w:w ") || (scale == 100) == strings.Contains(scaled, fmt.Sprintf(`<w:w w:val="%d"/>`, scale)) {
+				t.Fatalf("scale %d%%: %s", scale, doc)
 			}
 		})
 	}
 }
-
-// Letters that are wide by design (n in a bold monospace face) are not
-// horizontally scaled text.
 func TestWideLettersAreNotScaling(t *testing.T) {
 	opts := integrationOptions(t)
 	opts.AllowWarnings = false
@@ -600,6 +596,15 @@ func TestWideLettersAreNotScaling(t *testing.T) {
 
 func FuzzPageModel(f *testing.F) {
 	seed, _ := json.Marshal(tablePage())
+	f.Add(seed)
+	// Faces with and without known widths, word gaps, leaders, a scale.
+	var spans []Span
+	for i, font := range []string{"Verdana", "ArialMT", "DejaVuSansMono", "Courier", "Symbol"} {
+		s := span("Entry .......", 72+90*float64(i), 100, 80)
+		s.Font, s.Scale = font, 90+5*i
+		spans = append(spans, s, span("7", 160+90*float64(i), 100, 6))
+	}
+	seed, _ = json.Marshal(Page{Width: 612, Height: 792, Spans: spans})
 	f.Add(seed)
 	f.Fuzz(func(t *testing.T, b []byte) {
 		if len(b) > 65536 {
@@ -617,7 +622,7 @@ func FuzzPageModel(f *testing.F) {
 }
 
 func TestFontNames(t *testing.T) {
-	for in, want := range map[string]string{"ABCDEF+TimesNewRomanPS-BoldMT": "Times New Roman", "ArialMT": "Arial", "Arial-Black": "Arial Black", "Arial,Bold": "Arial", "Helvetica-Oblique": "Arial", "SegoeUI-Semibold": "Segoe UI Semibold", "Calibri": "Calibri", "CourierNewPSMT": "Courier New", "Times-Roman": "Times New Roman", "BookAntiqua-Bold": "Book Antiqua", "STSong-Light-UniGB-UCS2-H": "STSong Light", "MSungStd-Light-Acro": "MSung Std Light", "ABCDEF+SomeVeryLongFontFamilyNameThatGoesOnAndOn": "Some Very Long Font Family Name", "DejaVuSans-Bold": "DejaVu Sans", "LiberationSerif": "Liberation Serif"} {
+	for in, want := range map[string]string{"ABCDEF+TimesNewRomanPS-BoldMT": "Times New Roman", "ArialMT": "Arial", "Arial-Black": "Arial Black", "Arial,Bold": "Arial", "Helvetica-Oblique": "Arial", "SegoeUI-Semibold": "Segoe UI Semibold", "Calibri": "Calibri", "CourierNewPSMT": "Courier New", "Times-Roman": "Times New Roman", "BookAntiqua-Bold": "Book Antiqua", "STSong-Light-UniGB-UCS2-H": "STSong Light", "MSungStd-Light-Acro": "MSung Std Light", "ABCDEF+SomeVeryLongFontFamilyNameThatGoesOnAndOn": "Some Very Long Font Family Name", "DejaVuSans-Bold": "Deja Vu Sans", "Courier-Bold": "Courier New", "LiberationSerif": "Liberation Serif"} {
 		if got := fontName(in); got != want {
 			t.Errorf("fontName(%q) = %q, want %q", in, got, want)
 		}
@@ -779,7 +784,7 @@ func TestFindRectoIgnoresWorkingDirectory(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(planted, "dist"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	os.WriteFile(filepath.Join(planted, "package.json"), []byte(`{"name":"@2018kguo/recto","version":"0.8.0"}`), 0o600)
+	os.WriteFile(filepath.Join(planted, "package.json"), []byte(`{"name":"@2018kguo/recto","version":"0.8.2"}`), 0o600)
 	os.WriteFile(filepath.Join(planted, "dist", "index.js"), []byte(`throw new Error("planted")`), 0o600)
 	t.Chdir(dir)
 	t.Setenv("VERSO_RECTO_MODULE", "")
@@ -1095,7 +1100,8 @@ func TestRunningLineEdgeCases(t *testing.T) {
 }
 
 // Stored images carry their sizes in the local header (no data descriptor),
-// which streaming ZIP readers require.
+// which streaming ZIP readers require, and every entry states ZIP 2.0, which
+// Word requires.
 func TestStoredImagesHaveLocalSizes(t *testing.T) {
 	p := Page{Width: 612, Height: 792, Spans: []Span{span("Logo", 72, 72, 40)}, Images: []Image{{Box: Box{72, 100, 10, 10}, PNG: pngPixel(t)}}}
 	var out bytes.Buffer
@@ -1124,4 +1130,647 @@ func pngPixel(t *testing.T) []byte {
 		t.Fatal(err)
 	}
 	return b.Bytes()
+}
+
+// A numbered heading or contents entry keeps its tab: the text after the
+// number starts at its source x, not one space along.
+func TestLeadingNumberTab(t *testing.T) {
+	for _, c := range []struct {
+		number, text string
+		gap          float64
+		tab          bool
+	}{{"3", "Beginning of the paragraph", 16, true}, {"1", "Do not shorten", 13, true}, {"The", "quick brown fox", 4, false}} {
+		number := span(c.number, 72, 100, 8)
+		text := span(c.text, 80+c.gap, 100, 150)
+		var out bytes.Buffer
+		if _, err := Write(&out, []Page{{Width: 612, Height: 792, Spans: []Span{number, text}}}); err != nil {
+			t.Fatal(err)
+		}
+		doc := docParts(t, out.Bytes())["word/document.xml"]
+		if got := strings.Contains(doc, "<w:tab/>") && strings.Contains(doc, fmt.Sprintf(`w:pos="%d"`, twips(80+c.gap))); got != c.tab {
+			t.Fatalf("%q + %.0fpt gap: tab %v, want %v: %s", c.number, c.gap, got, c.tab, doc)
+		}
+	}
+}
+
+// Justification stretches every word gap alike: the first one, however
+// wide, stays a space when the line's other gaps are as wide.
+func TestJustifiedFirstGapIsASpace(t *testing.T) {
+	var spans []Span
+	x := 72.0
+	for _, word := range []string{"$532.16", "per", "month", "toward", "the", "premium"} {
+		spans = append(spans, span(word, x, 100, 6*float64(len(word))))
+		x += 6*float64(len(word)) + 15.8
+	}
+	var out bytes.Buffer
+	if _, err := Write(&out, []Page{{Width: 612, Height: 792, Spans: spans}}); err != nil {
+		t.Fatal(err)
+	}
+	if doc := docParts(t, out.Bytes())["word/document.xml"]; strings.Contains(doc, "<w:tab/>") {
+		t.Fatalf("justified word gap written as a tab: %s", doc)
+	}
+}
+
+// A one-line numbered heading between two paragraph gaps stands alone, even
+// when the next paragraph starts at the heading text's hanging indent.
+func TestHeadingBetweenParagraphGaps(t *testing.T) {
+	at := func(text string, x, baseline, w float64) Span {
+		s := span(text, x, baseline-10, w)
+		s.Size = 11
+		return s
+	}
+	var spans []Span
+	spans = append(spans, at("ending of the previous paragraph that runs full", 113, 100, 425), at("width to the right margin and stops here.", 113, 115, 300))
+	spans = append(spans, at("2.6", 85, 145, 14), at("Extension of Termination Effective Date", 113, 145, 190))
+	for i, text := range []string{"Customer may extend the effective date of termination or the end of the", "Initial Term or the Optional Period one or more times as it elects, at its", "sole discretion."} {
+		spans = append(spans, at(text, 113, 170+15*float64(i), []float64{425, 425, 70}[i]))
+	}
+	var out bytes.Buffer
+	if _, err := Write(&out, []Page{{Width: 612, Height: 792, Spans: spans}}); err != nil {
+		t.Fatal(err)
+	}
+	doc := docParts(t, out.Bytes())["word/document.xml"]
+	heading := doc[strings.Index(doc, "Extension of"):]
+	if end := strings.Index(heading, "</w:p>"); strings.Contains(heading[:end], "Customer") {
+		t.Fatal("heading merged into the next paragraph")
+	}
+}
+
+// In a justified column every line but a paragraph's last reaches the edge,
+// so a short line ends its paragraph even when the next line's first word
+// ("Article") would not have fit after it.
+func TestJustifiedShortLineEndsParagraph(t *testing.T) {
+	at := func(text string, baseline, w float64) Span {
+		s := span(text, 57, baseline-10, w)
+		s.Size = 12
+		return s
+	}
+	var spans []Span
+	for i, text := range []string{"All are equal before the law and are entitled without any discrimination", "to equal protection of the law. All are entitled to equal protection", "against any incitement to such discrimination.", "Article 8", "Everyone has the right to an effective remedy by the competent national", "tribunals for acts violating the fundamental rights granted him by law."} {
+		spans = append(spans, at(text, 100+16*float64(i), []float64{482, 482, 442, 49, 482, 300}[i]))
+	}
+	pages := []Page{{Width: 612, Height: 792, Spans: spans}}
+	var out bytes.Buffer
+	if _, err := Write(&out, pages); err != nil {
+		t.Fatal(err)
+	}
+	doc := docParts(t, out.Bytes())["word/document.xml"]
+	heading := doc[:strings.Index(doc, "Article 8")]
+	if !strings.Contains(heading[strings.LastIndex(heading, "<w:p>"):], "</w:pPr>") || strings.Contains(heading[strings.LastIndex(heading, "<w:p>"):], "discrimination.") {
+		t.Fatal("heading merged into the justified paragraph above it")
+	}
+	// A short line mid-sentence is a manual break, not a paragraph end.
+	spans[2].Text = "against any incitement to such discrimination up to"
+	spans[3].Text, spans[3].Width = "notwithstanding the rest", 130
+	out.Reset()
+	if _, err := Write(&out, pages); err != nil {
+		t.Fatal(err)
+	}
+	doc = docParts(t, out.Bytes())["word/document.xml"]
+	if para := doc[strings.LastIndex(doc[:strings.Index(doc, "notwithstanding")], "<w:p>"):]; !strings.Contains(para[:strings.Index(para, "notwithstanding")], "All are equal") {
+		t.Fatal("a manual line break mid-sentence ended the paragraph")
+	}
+}
+
+// Display lines set tighter than 1.2 times their size keep their source
+// pitch: a guessed taller line pushes every line after it down the page.
+func TestTightSingleLinesKeepTheirPitch(t *testing.T) {
+	var spans []Span
+	for i, size := range []float64{14, 7.5, 14, 7.5} {
+		s := span(fmt.Sprintf("Display line %d", i), 100, 100+11*float64(i)-size, 8*size)
+		s.Size, s.Height, s.Baseline = size, size, 100+11*float64(i)
+		spans = append(spans, s)
+	}
+	var out bytes.Buffer
+	if _, err := Write(&out, []Page{{Width: 612, Height: 792, Spans: spans}}); err != nil {
+		t.Fatal(err)
+	}
+	doc := docParts(t, out.Bytes())["word/document.xml"]
+	// Word puts an exact line's baseline 80% down its box (baselineDepth).
+	top, k := 0, 0
+	for _, m := range regexp.MustCompile(`w:before="(\d+)" w:after="0" w:line="(\d+)"`).FindAllStringSubmatch(doc, -1) {
+		before, _ := strconv.Atoi(m[1])
+		line, _ := strconv.Atoi(m[2])
+		top += before
+		if line > 1 {
+			if got, want := float64(top)/20+0.8*float64(line)/20, spans[k].Baseline; math.Abs(got-want) > 0.3 {
+				t.Fatalf("line %d baseline at %.2fpt in Word, %.2fpt in the source: %s", k, got, want, doc)
+			}
+			k++
+		}
+		top += line
+	}
+}
+
+// Drawn leader dots before a closing page number become a right tab with a
+// dot leader at the number's edge: drawn dots in Word's metrics run long and
+// wrap the number onto a line of its own.
+func TestLeaderDotsBecomeATab(t *testing.T) {
+	for _, spans := range [][]Span{
+		{span("1.2", 84, 100, 19), span("Organizational Background ", 120, 100, 148), span("........................................", 267, 100, 280), span("5", 544, 100, 7)},
+		{span("1", 72, 100, 9), span("Background .............................", 104, 100, 443), span("4", 544, 100, 7)},
+	} {
+		var out bytes.Buffer
+		if _, err := Write(&out, []Page{{Width: 612, Height: 792, Spans: spans}}); err != nil {
+			t.Fatal(err)
+		}
+		doc := docParts(t, out.Bytes())["word/document.xml"]
+		if strings.Contains(doc, "....") || !strings.Contains(doc, `<w:tab w:val="right" w:leader="dot"`) {
+			t.Fatalf("leader not a dot-leader tab at the number: %s", doc)
+		}
+	}
+	// A contents page's entries stay one paragraph each: joined, Word
+	// wrapped each entry's title onto the previous entry's line.
+	var spans []Span
+	for i, title := range []string{"Transitional services ", "Transition Period", "Termination", "Description of Services", "General Limitations."} {
+		y := 100 + 22*float64(i)
+		spans = append(spans, span(fmt.Sprint(i+1)+" ", 72, y, 8), span(title, 94, y, 7*float64(len(title))), span(strings.Repeat(".", 60), 94+7*float64(len(title)), y, 440-7*float64(len(title))), span(fmt.Sprint(i+2), 534, y, 6))
+	}
+	var out bytes.Buffer
+	if _, err := Write(&out, []Page{{Width: 612, Height: 792, Spans: spans}}); err != nil {
+		t.Fatal(err)
+	}
+	// and each title keeps its tab after the number.
+	doc := docParts(t, out.Bytes())["word/document.xml"]
+	if n, tabs := strings.Count(doc, `w:leader="dot"`), strings.Count(doc, `<w:tab/>`); n != 5 || tabs != 10 {
+		t.Fatalf("%d contents paragraphs with a leader tab and %d tabs, want 5 and 10", n, tabs)
+	}
+}
+
+// A ragged paragraph's column ends short of where any line would take the
+// next line's first word: a line shorter than the widest has more room, and
+// Word pulled "tenure," up into it.
+func TestRaggedColumnPullsNoWordUp(t *testing.T) {
+	var ls []Line
+	for i, c := range []struct {
+		text  string
+		width float64
+	}{{"General. The population is varied and heavily staffed by XXX. Nearly", 490}, {"have many employees who are sophisticated in computing, pressured by their short", 452}, {"tenure, and must learn our environment quickly in order to be productive. We", 472}, {"tools. Although the ultimate goal is to provide a standardized desktop computing", 498}} {
+		ls = append(ls, Line{Spans: []Span{span(c.text, 54, 100+14*float64(i), c.width)}, X: 54, Baseline: 110 + 14*float64(i), Width: c.width, Height: 12})
+	}
+	for _, p := range paragraphs(ls, 54, 552) {
+		for i := 0; i+1 < len(p.Lines); i++ {
+			if room := p.Right - p.Lines[i].right(); room >= p.Lines[i+1].firstWord() {
+				t.Fatalf("line %d has %.1fpt of room for the next line's %.1fpt first word", i, room, p.Lines[i+1].firstWord())
+			}
+		}
+	}
+}
+
+// A typesetter shrinks word gaps to fit a line; the space Word gets between
+// two word spans is the source gap wide, not Word's own space, or the line
+// runs long and rewraps.
+func TestSpaceBetweenSpansKeepsTheGap(t *testing.T) {
+	a, b := span("arbitrarily", 72, 100, 52), span("deprived", 126.5, 100, 40) // a 2.5pt gap
+	a.Font, b.Font = "Helvetica", "Helvetica"
+	var out bytes.Buffer
+	if _, err := Write(&out, []Page{{Width: 612, Height: 792, Spans: []Span{a, b}}}); err != nil {
+		t.Fatal(err)
+	}
+	doc := docParts(t, out.Bytes())["word/document.xml"]
+	m := regexp.MustCompile(`<w:spacing w:val="(-?\d+)"/>(?:<w:[^>]*>)*</w:rPr><w:t xml:space="preserve"> </w:t>`).FindStringSubmatch(doc)
+	if m == nil {
+		t.Fatalf("no tracked space between the spans: %s", doc)
+	}
+	v, _ := strconv.Atoi(m[1])
+	if got := float64(advance(faceAdvances["Arial"], ' '))/1000*a.Size + float64(v)/20; math.Abs(got-2.5) > 0.05 {
+		t.Fatalf("space %.2fpt wide in Word, source gap 2.5pt", got)
+	}
+}
+
+// A face Word has but whose widths are unknown (Verdana) still writes its
+// spaces and leaders: their widths fall back, they never index a table.
+func TestUnknownFaceMetricsFallBack(t *testing.T) {
+	a, b, n := span("Name", 72, 100, 30), span(".........", 110, 100, 300), span("12", 420, 100, 12)
+	a.Font, b.Font, n.Font = "Verdana", "Verdana", "Verdana"
+	var out bytes.Buffer
+	if _, err := Write(&out, []Page{{Width: 612, Height: 792, Spans: []Span{a, span("word", 107, 100, 1), b, n}}}); err != nil {
+		t.Fatal(err)
+	}
+	docParts(t, out.Bytes())
+}
+
+// A justified line drawn as one span shows its stretch in the span's
+// spaces: wider than Word draws them. A two-line paragraph stays justified.
+func TestInSpanStretchIsJustified(t *testing.T) {
+	text := "Lorem ipsum dolor sit amet, consectetuer adipiscing elit. Maecenas porttitor"
+	first := span(text, 54, 100, emsOf(text, "Times New Roman")*12+9*1.6) // nine spaces, 1.6pt each wider
+	first.Font, first.Size = "TimesNewRomanPSMT", 12
+	second := span("ultricies, purus lectus malesuada libero.", 54, 114, 200)
+	second.Font, second.Size = "TimesNewRomanPSMT", 12
+	var out bytes.Buffer
+	if _, err := Write(&out, []Page{{Width: 612, Height: 792, Spans: []Span{first, second}}}); err != nil {
+		t.Fatal(err)
+	}
+	if doc := docParts(t, out.Bytes())["word/document.xml"]; !strings.Contains(doc, `<w:jc w:val="both"/>`) {
+		t.Fatalf("stretched paragraph not justified: %s", doc)
+	}
+}
+
+// Word stretches a justified line to the paragraph's right edge, so every
+// justified paragraph ends at its column edge: a two-line one too.
+func TestJustifiedParagraphsEndAtTheEdge(t *testing.T) {
+	// Lines drawn a little narrower than Word's natural width (no stretch to
+	// read from the spaces), so only the column shows the justification.
+	text := "Everyone has the right to form and to join trade unions for the protection"
+	full := emsOf(text, "Arial") * 12 * 0.995
+	var ls []Line
+	for i, w := range []float64{full, full, full, 300, full, 25, full, full, 200} {
+		s := span(text, 56, 60+16*float64(i), w)
+		s.Size = 12
+		ls = append(ls, Line{Spans: []Span{s}, X: 56, Baseline: 70 + 16*float64(i), Width: w, Height: 12})
+	}
+	edge := 56 + full
+	for _, p := range paragraphs(ls, 56, edge) {
+		if p.Align == "both" && p.Right > edge+0.5 {
+			t.Fatalf("justified %d-line paragraph ends at %.1f, the column at %.1f", len(p.Lines), p.Right, edge)
+		}
+	}
+}
+
+// A link Word cannot carry (a bare % in the URL) costs the link, not the
+// document.
+func TestMalformedLinkKeepsItsText(t *testing.T) {
+	bad := span("new arrivals", 72, 100, 60)
+	bad.Link = "http://example.org/100%new/item.html"
+	good := span("home", 72, 120, 30)
+	good.Link = "https://example.org/"
+	p := Page{Width: 612, Height: 792, Spans: []Span{bad, good}}
+	notes := p.sanitize()
+	if err := p.validate(); err != nil || p.Spans[0].Link != "" || p.Spans[0].Text != "new arrivals" || p.Spans[1].Link != good.Link || len(notes) != 1 {
+		t.Fatalf("validate %v, spans %+v, notes %q", err, p.Spans, notes)
+	}
+}
+
+// A tab drawn in the PDF becomes a tab to a stop at the next text's x, not a
+// space, even across a gap narrower than a space-or-tab guess would allow.
+func TestDrawnTabReachesItsStop(t *testing.T) {
+	population := span("Population", 268, 100, 90)
+	population.Tab = true
+	words := span("then words", 362, 100, 60)
+	var out bytes.Buffer
+	if _, err := Write(&out, []Page{{Width: 612, Height: 792, Spans: []Span{span("Human", 200, 100, 62), population, words}}}); err != nil {
+		t.Fatal(err)
+	}
+	doc := docParts(t, out.Bytes())["word/document.xml"]
+	if strings.Count(doc, "<w:tab/>") != 1 || !strings.Contains(doc, fmt.Sprintf(`w:pos="%d"`, twips(268))) {
+		t.Fatalf("tab not reproduced as a stop at 268pt: %s", doc)
+	}
+}
+
+// Word lays a font it lacks out in a substitute; the writer names one whose
+// widths it knows and scales the span to its source width, so lines break
+// where the PDF's did. Fonts Word has stay as they are.
+func TestSubstituteFontsKeepSourceWidths(t *testing.T) {
+	text := "Proclamation of the Loan"
+	for _, c := range []struct {
+		font  string
+		width float64 // source width as a share of Arial Bold's
+	}{{"DejaVuSans-Bold", 1.12}, {"ABCDEF+Frutiger-Bold", 0.95}, {"Arial-BoldMT", 1.005}} {
+		s := span(text, 72, 100, c.width*emsOf(text, "Arial|b")*11)
+		s.Font, s.Weight = c.font, 700
+		if word := wordWidth(t, s, "Arial|b"); math.Abs(word-s.Width) > 0.005*s.Width {
+			t.Fatalf("%s: Word width %.2f, source %.2f", c.font, word, s.Width)
+		}
+	}
+}
+
+// Word draws a 6.81pt span at 7pt (half points); the scale and tracking it
+// gets must still give it its source width, or every line of small print
+// wraps a word early.
+// wordWidth is the width Word lays out a one-span page's text in, from the
+// family's advances and the run's size, scale and tracking.
+func wordWidth(t *testing.T, s Span, face string) float64 {
+	t.Helper()
+	var out bytes.Buffer
+	if _, err := Write(&out, []Page{{Width: 612, Height: 792, Spans: []Span{s}}}); err != nil {
+		t.Fatal(err)
+	}
+	doc := docParts(t, out.Bytes())["word/document.xml"]
+	attr := func(tag string, fallback float64) float64 {
+		if m := regexp.MustCompile(`<w:` + tag + ` w:val="(-?\d+)"/>`).FindStringSubmatch(doc); m != nil {
+			v, _ := strconv.ParseFloat(m[1], 64)
+			return v
+		}
+		return fallback
+	}
+	if !strings.Contains(doc, `w:ascii="`+strings.Split(face, "|")[0]+`"`) {
+		t.Fatalf("not laid out in %s: %s", face, doc)
+	}
+	ems, n := 0.0, 0.0
+	for _, r := range s.Text {
+		ems += float64(advance(faceAdvances[face], r)) / 1000
+		n++
+	}
+	return ems*attr("sz", 0)/2*attr("w", 100)/100 + n*attr("spacing", 0)/20
+}
+
+func emsOf(text, face string) float64 {
+	ems := 0.0
+	for _, r := range text {
+		ems += float64(advance(faceAdvances[face], r)) / 1000
+	}
+	return ems
+}
+
+func TestHalfPointSizeKeepsSourceWidth(t *testing.T) {
+	s := span("means the Revolving Commitments of all", 53, 100, emsOf("means the Revolving Commitments of all", "Courier New")*6.81)
+	s.Font, s.Size, s.Mono = "DejaVuSansMono", 6.81, true
+	if word := wordWidth(t, s, "Courier New"); math.Abs(word-s.Width) > 0.005*s.Width {
+		t.Fatalf("Word width %.2f, source %.2f", word, s.Width)
+	}
+}
+
+// A span within 2% of Word's width (a source "ﬁ" ligature is narrower than
+// "f" and "i") keeps its source width through tracking, not a scale: else a
+// full line's last word wraps, and on a full page spills onto a new one.
+func TestNearWidthsTrackToSourceWidth(t *testing.T) {
+	text := "until the Class Certificates"
+	s := span(text, 72, 100, emsOf(text, "Times New Roman")*12-2) // three ligatures' worth narrower
+	s.Font, s.Size = "TimesNewRomanPSMT", 12
+	if word := wordWidth(t, s, "Times New Roman"); math.Abs(word-s.Width) > 0.005*s.Width {
+		t.Fatalf("Word width %.2f, source %.2f", word, s.Width)
+	}
+	// Wider with spaces is a justified line's stretched spaces: Word's
+	// justification redraws those, and tracking them too overfills the line.
+	s.Width = emsOf(text, "Times New Roman")*12 + 2
+	if word := wordWidth(t, s, "Times New Roman"); math.Abs(word-emsOf(text, "Times New Roman")*12) > 0.01 {
+		t.Fatalf("justified stretch tracked: Word width %.2f", word)
+	}
+}
+
+// reader.mjs needs Recto's per-glyph scales (0.8.1) and text-free renders (0.8.2).
+func TestRectoVersion(t *testing.T) {
+	for v, ok := range map[string]bool{"0.8.0": false, "0.8.1": false, "0.8.2": true, "0.8.12": true, "0.8.3-rc.1": true, "0.9.0": false, "0.7.1": false, "0.8.01": false} {
+		if rectoVersion.MatchString(v) != ok {
+			t.Errorf("%s: accepted %v, want %v", v, !ok, ok)
+		}
+	}
+}
+
+// Faux italic (a slant in the text matrix) widens each glyph's box, not its
+// advance: the slanted line is one span as wide as the upright one.
+// A shaded panel under text keeps its look as an image drawn without that
+// text (Word draws the text over it), not dropped and not doubled.
+func TestShadingUnderTextIsArtWithoutText(t *testing.T) {
+	opts := integrationOptions(t)
+	input := filepath.Join(t.TempDir(), "shaded.pdf")
+	fixturePDF(t, input, 1, false, func(_ string) string {
+		return "0.8 g 40 680 300 40 re f 0 g BT /F1 14 Tf 50 695 Td (Shaded cell text) Tj ET\n"
+	})
+	pages, err := Extract(context.Background(), input, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pages[0].Images) != 1 {
+		t.Fatalf("want the panel as one image: %+v", pages[0].Images)
+	}
+	im, err := png.Decode(bytes.NewReader(pages[0].Images[0].PNG))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := im.Bounds()
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			if r, _, _, _ := im.At(x, y).RGBA(); r < 0x8000 {
+				t.Fatalf("panel image has the text drawn into it at %d,%d", x, y)
+			}
+		}
+	}
+}
+
+// An annotation's appearance (a stamped signature) keeps its look as an
+// image, drawn without the page text under it.
+func TestStampedSignatureIsKept(t *testing.T) {
+	opts := integrationOptions(t)
+	input := filepath.Join(t.TempDir(), "stamp.pdf")
+	content := "BT /F1 12 Tf 80 640 Td (Lucy Director) Tj ET\n"
+	stamp := "0 g 2 w 10 10 m 150 60 l S\n"
+	objects := []string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Count 1 /Kids [3 0 R] >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R /Annots [6 0 R] >>",
+		"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+		fmt.Sprintf("<< /Length %d >>\nstream\n%sendstream", len(content), content),
+		"<< /Type /Annot /Subtype /Stamp /Rect [70 620 230 700] /AP << /N 7 0 R >> >>",
+		fmt.Sprintf("<< /Type /XObject /Subtype /Form /BBox [0 0 160 80] /Length %d >>\nstream\n%sendstream", len(stamp), stamp),
+	}
+	writePDF(t, input, objects)
+	pages, err := Extract(context.Background(), input, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stampImage []byte
+	for _, im := range pages[0].Images {
+		if math.Abs(im.X-70) < 1 && math.Abs(im.Width-160) < 1 {
+			stampImage = im.PNG
+		}
+	}
+	if stampImage == nil {
+		t.Fatalf("stamp not kept as an image: %+v", pages[0].Images)
+	}
+	im, err := png.Decode(bytes.NewReader(stampImage))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dark := 0
+	for y := im.Bounds().Min.Y; y < im.Bounds().Max.Y; y++ {
+		for x := im.Bounds().Min.X; x < im.Bounds().Max.X; x++ {
+			if r, _, _, _ := im.At(x, y).RGBA(); r < 0x8000 {
+				dark++
+			}
+		}
+	}
+	if dark == 0 {
+		t.Fatal("stamp image is blank")
+	}
+}
+
+// A ligature's letters share one glyph box; they stay one span at their
+// source width, not a second span stretched back over the ligature.
+func TestLigatureIsOneSpan(t *testing.T) {
+	opts := integrationOptions(t)
+	input := filepath.Join(t.TempDir(), "ligature.pdf")
+	fixturePDF(t, input, 1, false, func(_ string) string {
+		return "BT /F1 12 Tf 50 700 Td (until the Class Certi\\256cates) Tj ET\n"
+	})
+	pages, err := Extract(context.Background(), input, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(pages[0].Spans); n != 1 || !strings.HasSuffix(pages[0].Spans[0].Text, "cates") || !strings.Contains(pages[0].Spans[0].Text, "Certi") {
+		t.Fatalf("want one span: %+v", pages[0].Spans)
+	}
+}
+
+func TestFauxItalicKeepsAdvances(t *testing.T) {
+	opts := integrationOptions(t)
+	input := filepath.Join(t.TempDir(), "slant.pdf")
+	fixturePDF(t, input, 1, false, func(_ string) string {
+		return "BT /F1 14 Tf 1 0 0 1 50 700 Tm (WILL SELL THE PROPERTY) Tj ET\nBT /F1 14 Tf 1 0 0.3 1 50 650 Tm (WILL SELL THE PROPERTY) Tj ET\n"
+	})
+	pages, err := Extract(context.Background(), input, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	widths := map[float64][]float64{}
+	for _, s := range pages[0].Spans {
+		if strings.Contains(s.Text, "PROPERTY") {
+			widths[math.Round(s.Baseline)] = append(widths[math.Round(s.Baseline)], s.Width)
+		}
+	}
+	upright, slanted := widths[92], widths[142]
+	if len(upright) != 1 || len(slanted) != 1 || math.Abs(slanted[0]-upright[0]) > 0.02*upright[0] {
+		t.Fatalf("upright %v, slanted %v (by baseline: %v)", upright, slanted, widths)
+	}
+}
+
+// writePDF writes numbered objects (1 is the catalog) as a PDF file.
+func writePDF(t *testing.T, path string, objects []string) {
+	t.Helper()
+	var b bytes.Buffer
+	b.WriteString("%PDF-1.4\n")
+	var offsets []int
+	for i, obj := range objects {
+		offsets = append(offsets, b.Len())
+		fmt.Fprintf(&b, "%d 0 obj\n%s\nendobj\n", i+1, obj)
+	}
+	xref := b.Len()
+	fmt.Fprintf(&b, "xref\n0 %d\n0000000000 65535 f \n", len(objects)+1)
+	for _, o := range offsets {
+		fmt.Fprintf(&b, "%010d 00000 n \n", o)
+	}
+	fmt.Fprintf(&b, "trailer << /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", len(objects)+1, xref)
+	if err := os.WriteFile(path, b.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Glyphs scaled far past the page (seen in the wild) neither exhaust the
+// reader's heap (a rotated one is clipped before clustering) nor refuse the
+// document (an upright one is left out).
+func TestHugeRotatedGlyphIsClipped(t *testing.T) {
+	opts := integrationOptions(t)
+	input := filepath.Join(t.TempDir(), "huge.pdf")
+	content := "BT /F1 12 Tf 80 640 Td (Body text) Tj ET\nBT /F1 1 Tf -100000 0 0 -100000 300 400 Tm (X) Tj ET\nBT /F1 1 Tf 100000 0 0 100000 -1000 -1000 Tm (Y) Tj ET\n"
+	writePDF(t, input, []string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Count 1 /Kids [3 0 R] >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+		"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+		fmt.Sprintf("<< /Length %d >>\nstream\n%sendstream", len(content), content),
+	})
+	pages, err := Extract(context.Background(), input, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, im := range pages[0].Images {
+		if im.X < 0 || im.Y < 0 || im.X+im.Width > 612.5 || im.Y+im.Height > 792.5 {
+			t.Fatalf("image %+v leaves the page", im)
+		}
+	}
+	var text string
+	for _, sp := range pages[0].Spans {
+		text += sp.Text
+	}
+	if !strings.Contains(text, "Body") || strings.Contains(text, "Y") {
+		t.Fatalf("spans %+v: want the body text without the page-sized glyph", pages[0].Spans)
+	}
+}
+
+// Sheet music's staff lines read as thousands of borders: the page keeps its
+// text in the flow with a warning instead of refusing the document.
+func TestTooManyBordersKeepTheText(t *testing.T) {
+	p := Page{Width: 612, Height: 792, Spans: []Span{{Text: "Allegro", Box: Box{X: 72, Y: 60, Width: 40, Height: 12}, Baseline: 70, Size: 12, Font: "Helvetica", Color: "000000"}}}
+	for i := range maxBorders + 1 {
+		y := 100 + float64(i%600)
+		p.Segments = append(p.Segments, Segment{X1: 72, Y1: y, X2: 540, Y2: y})
+	}
+	notes := p.sanitize()
+	l, err := layout(p)
+	if err != nil || len(l.Tables) != 0 || !strings.Contains(strings.Join(notes, " "), "Too many drawn lines") {
+		t.Fatalf("layout %v, tables %d, notes %q", err, len(l.Tables), notes)
+	}
+}
+
+// Past Recto's render limit (32 knockout groups) an image is approximate:
+// the page converts with a warning instead of refusing the document.
+func TestLayeredImagesAreApproximate(t *testing.T) {
+	opts := integrationOptions(t)
+	input := filepath.Join(t.TempDir(), "layers.pdf")
+	content := "BT /F1 12 Tf 80 700 Td (Layers) Tj ET\n"
+	for i := range 40 {
+		content += fmt.Sprintf("q /G gs 1 0 0 1 %d 300 cm /X Do Q\n", 60+10*i)
+	}
+	group := "0.2 0.4 0.8 rg 0 0 40 40 re f 0.8 0.2 0.2 rg 10 10 40 40 re f\n"
+	writePDF(t, input, []string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Count 1 /Kids [3 0 R] >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> /XObject << /X 6 0 R >> /ExtGState << /G << /BM /Multiply /ca 0.5 >> >> >> /Contents 5 0 R >>",
+		"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+		fmt.Sprintf("<< /Length %d >>\nstream\n%sendstream", len(content), content),
+		fmt.Sprintf("<< /Type /XObject /Subtype /Form /BBox [0 0 60 60] /Group << /S /Transparency /K true >> /Length %d >>\nstream\n%sendstream", len(group), group),
+	})
+	pages, err := Extract(context.Background(), input, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pages[0].Images) == 0 || !strings.Contains(strings.Join(pages[0].Warnings, " "), "approximate") {
+		t.Fatalf("images %d, warnings %q", len(pages[0].Images), pages[0].Warnings)
+	}
+}
+
+// A line that fills the column mid-sentence wraps onto the next, even when
+// that line starts like a list item ("(30) days"); after a colon it is one.
+func TestWrappedNumberIsNoListItem(t *testing.T) {
+	for _, c := range []struct {
+		last  string
+		paras int
+	}{{"cure such breach within thirty", 1}, {"the Provider shall do the following:", 2}} {
+		var ls []Line
+		for i, text := range []string{"Provider may terminate the Agreement if and only if Customer breaches in", "duty under the Agreement to pay undisputed charges, and fails to " + c.last, "(30) days after written notice."} {
+			w := []float64{480, 480, 130}[i]
+			ls = append(ls, Line{Spans: []Span{span(text, 72, 100+15*float64(i), w)}, X: 72, Baseline: 110 + 15*float64(i), Width: w, Height: 12})
+		}
+		if got := len(paragraphs(ls, 72, 552)); got != c.paras {
+			t.Fatalf("after %q: %d paragraphs, want %d", c.last, got, c.paras)
+		}
+	}
+}
+
+// Word spreads a justified line's spare width over its spaces, so the width
+// an 11.1pt size loses to half points is tracked back only on a ragged line:
+// on a tightly set justified one it overfilled the line, and every later
+// line rewrapped.
+func TestJustifiedLinesTrackNoRoundingLoss(t *testing.T) {
+	text := "which are in force and effect at the time of initiating arbitration"
+	s := span(text, 72, 100, emsOf(text, "Times New Roman")*11.1+1)
+	s.Font, s.Size = "TimesNewRomanPSMT", 11.1
+	_, ragged, ok := wordFit(s, "Times New Roman", false)
+	_, justified, _ := wordFit(s, "Times New Roman", true)
+	if !ok || ragged <= 0 || justified != 0 {
+		t.Fatalf("tracking ragged %.3f, justified %.3f: want the loss only on the ragged line", ragged, justified)
+	}
+}
+
+// A justified line a hair wider in Word than in the source (-0.015pt a
+// character, under a twip) is set narrower, not at Word's width: rounded to
+// zero, a full line overfilled and Word wrapped its last word.
+func TestJustifiedLinesRoundTrackingDown(t *testing.T) {
+	text := "himself and of his family, including food, clothing, housing and medical care"
+	var spans []Span
+	for i := range 3 {
+		s := span(text, 57, 100+16*float64(i), emsOf(text, "Times New Roman")*14-0.015*float64(len(text)-1))
+		s.Font, s.Size = "TimesNewRomanPSMT", 14
+		spans = append(spans, s)
+	}
+	var out bytes.Buffer
+	if _, err := Write(&out, []Page{{Width: 612, Height: 792, Spans: spans}}); err != nil {
+		t.Fatal(err)
+	}
+	doc := docParts(t, out.Bytes())["word/document.xml"]
+	// The last line, which justification leaves as set, keeps its width.
+	if !strings.Contains(doc, `<w:jc w:val="both"/>`) || strings.Count(doc, `<w:spacing w:val="-1"/>`) != 2 {
+		t.Fatalf("want the two stretched lines set a twip narrower: %s", doc)
+	}
 }

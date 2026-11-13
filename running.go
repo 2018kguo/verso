@@ -208,19 +208,22 @@ func (w *writer) marginPart(foot bool, ls []Line, height float64) string {
 		}
 		merged = append(merged, l)
 	}
+	// Each line's exact-height box starts where Word puts its baseline at the
+	// source's.
+	top := func(l Line) float64 { return l.Baseline - baselineDepth(l.Height) }
 	cursor := 0.0
 	if foot && len(merged) > 0 {
-		cursor = merged[0].Y
+		cursor = top(merged[0])
 	}
 	for i, l := range merged {
 		after := 0.0
 		if foot && i == len(merged)-1 {
-			after = height - (l.Y + l.Height)
+			after = height - (top(l) + l.Height)
 		}
-		fmt.Fprintf(&b, `<w:p><w:pPr>%s<w:spacing w:before="%d" w:after="%d" w:line="%d" w:lineRule="exact"/><w:ind w:left="%d" w:right="0"/><w:jc w:val="left"/></w:pPr>`, tabStops([]Line{l}, 0), max(0, twips(l.Y-cursor)), max(0, twips(after)), max(1, twips(l.Height)), twips(l.X))
+		fmt.Fprintf(&b, `<w:p><w:pPr>%s<w:spacing w:before="%d" w:after="%d" w:line="%d" w:lineRule="exact"/><w:ind w:left="%d" w:right="0"/><w:jc w:val="left"/></w:pPr>`, tabStops([]Line{l}, 0), max(0, twips(top(l)-cursor)), max(0, twips(after)), max(1, twips(l.Height)), twips(l.X))
 		w.runs(&b, l)
 		b.WriteString(`</w:p>`)
-		cursor = max(cursor, l.Y+l.Height)
+		cursor = max(cursor, top(l)+l.Height)
 	}
 	if len(merged) == 0 {
 		b.WriteString(`<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="1" w:lineRule="exact"/><w:rPr><w:sz w:val="1"/></w:rPr></w:pPr></w:p>`)

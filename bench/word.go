@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -58,6 +60,11 @@ func renderWithWord(ctx context.Context, timeout time.Duration, docx, pdf string
 	}
 	x := execute(ctx, timeout, 0, 0, box, "osascript", "-e", wordScript, in, out)
 	if x.Failure != "" {
+		// Word refusing a file shows a modal alert, which blocks every later
+		// render until answered. Record it as the failure and dismiss it.
+		if alerts := dismissWordAlerts(); len(alerts) > 0 {
+			x.Failure, x.Stderr = "alert", strings.Join(alerts, "\n")
+		}
 		// A hung Word holds every later render; close what it has open.
 		_ = execute(context.Background(), 20*time.Second, 0, 0, "", "osascript", "-e", `tell application "Microsoft Word" to close every document saving no`)
 		return x
@@ -157,4 +164,53 @@ func rescoreCLI(args []string) error {
 		}
 	}
 	return writeJSON(path, s)
+}
+
+// dismissWordAlerts reads and dismisses Word's modal alerts through the
+// agent-desktop CLI when it is installed (macOS accessibility), answering No
+// to a recovery offer so a damaged file is never silently repaired.
+func dismissWordAlerts() []string {
+	if _, err := exec.LookPath("agent-desktop"); err != nil {
+		return nil
+	}
+	type node struct {
+		Role     string `json:"role"`
+		Name     string `json:"name"`
+		Value    string `json:"value"`
+		Ref      string `json:"ref_id"`
+		Children []node `json:"children"`
+	}
+	var alerts []string
+	for range 50 {
+		out, err := exec.Command("agent-desktop", "snapshot", "--app", "Microsoft Word", "--compact").Output()
+		var snap struct {
+			OK   bool `json:"ok"`
+			Data struct {
+				Tree node `json:"tree"`
+			} `json:"data"`
+		}
+		if err != nil || json.Unmarshal(out, &snap) != nil || !snap.OK || snap.Data.Tree.Name != "alert" {
+			return alerts
+		}
+		buttons := map[string]string{}
+		var walk func(n node)
+		walk = func(n node) {
+			if n.Role == "statictext" && n.Value != "Microsoft Word" {
+				alerts = append(alerts, n.Value)
+			}
+			if n.Ref != "" {
+				buttons[n.Name] = n.Ref
+			}
+			for _, c := range n.Children {
+				walk(c)
+			}
+		}
+		walk(snap.Data.Tree)
+		ref := cmp.Or(buttons["No"], buttons["OK"], buttons["Cancel"])
+		if ref == "" || exec.Command("agent-desktop", "click", ref).Run() != nil {
+			return alerts
+		}
+		time.Sleep(time.Second)
+	}
+	return alerts
 }

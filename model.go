@@ -19,13 +19,15 @@ type Span struct {
 	Text, Font, Color, Link string
 	Baseline, Size          float64
 	Tracking                float64
-	Descent                 float64 // font descent below the baseline, in ems
+	Scale                   int // horizontal scale (Tz) in percent; 0 means 100
 	Weight                  int
 	Italic                  bool
 	Serif, Mono             bool    // the PDF font's flags, for Word's fallback
+	Tab                     bool    // drawn after a tab: Word reaches it with a tab stop
 	Rise                    float64 `json:"-"` // superscript or subscript offset, points up
 	Underline               bool    `json:"-"` // set from a rule under the span
 	PageNumber              bool    `json:"-"` // written as Word's PAGE field
+	Leader                  bool    `json:"-"` // after drawn leader dots: a right tab with a dot leader
 }
 type Segment struct{ X1, Y1, X2, Y2 float64 }
 type Image struct {
@@ -156,15 +158,27 @@ func (p *Page) sanitize() []string {
 		}
 	}
 	spans := p.Spans[:0]
+	links := 0
 	for _, s := range p.Spans {
-		if finite(s.X, s.Y, s.Width, s.Height, s.Size) && s.Size >= 0.5 && s.X+s.Width > 0 && s.Y+s.Height > 0 && s.X < p.Width && s.Y < p.Height {
+		// A link Word cannot carry (a malformed escape, another scheme)
+		// keeps its text without the link.
+		if s.Link != "" && !anchorPattern.MatchString(s.Link) {
+			if u, err := url.Parse(s.Link); err != nil || (u.Scheme != "https" && u.Scheme != "http" && u.Scheme != "mailto") {
+				s.Link = ""
+				links++
+			}
+		}
+		if finite(s.X, s.Y, s.Width, s.Height, s.Size) && s.Size >= 0.5 && s.Size <= 400 && s.X+s.Width > 0 && s.Y+s.Height > 0 && s.X < p.Width && s.Y < p.Height {
 			s.X, s.Y = math.Max(s.X, 0), math.Max(s.Y, 0)
 			s.Width, s.Height = math.Min(s.Width, p.Width-s.X), math.Min(s.Height, p.Height-s.Y)
 			spans = append(spans, s)
 		}
 	}
+	if links > 0 {
+		notes = append(notes, fmt.Sprintf("%d text runs keep their text without a link Word cannot carry", links))
+	}
 	if dropped := len(p.Spans) - len(spans); dropped > 0 {
-		notes = append(notes, fmt.Sprintf("%d text runs outside the page or under 0.5pt were left out", dropped))
+		notes = append(notes, fmt.Sprintf("%d text runs outside the page, under 0.5pt or over 400pt were left out", dropped))
 	}
 	p.Spans = spans
 	in := func(v, limit float64) bool { return finite(v) && v >= -2 && v <= limit+2 }
@@ -175,7 +189,7 @@ func (p *Page) sanitize() []string {
 		}
 	}
 	p.Segments = segments
-	if len(p.Segments) > 10000 {
+	if len(p.Segments) > 10000 || len(borders(*p)) > maxBorders {
 		p.Segments = nil
 		notes = append(notes, "Too many drawn lines to find ruled tables; their text stays in the flow")
 	}
@@ -262,11 +276,12 @@ func lines(spans []Span) []Line {
 			if i < len(l.Spans) {
 				g := gap(l.Spans[i-1], l.Spans[i])
 				// A list marker keeps its text across a tab of up to an inch.
-				if g <= math.Max(18, l.Spans[i].Size*2) || i == 1 && isMarker(l.Spans[0].Text) && g <= l.Spans[i].Size*6 {
+				// A drawn tab stays on its line (a tab-aligned label and value).
+				if g <= math.Max(18, l.Spans[i].Size*2) || i == 1 && isMarker(l.Spans[0].Text) && g <= l.Spans[i].Size*6 || l.Spans[i].Tab && g <= l.Spans[i].Size*12 {
 					continue
 				}
 			}
-			ss := l.Spans[start:i]
+			ss := leaders(l.Spans[start:i])
 			first, last := ss[0], ss[len(ss)-1]
 			blocks = append(blocks, Line{Spans: ss, X: first.X, Y: l.Y, Baseline: l.Baseline, Width: last.X + last.Width - first.X, Height: l.Height})
 			start = i
@@ -328,13 +343,13 @@ func touches(a, b Segment) bool {
 	return a.X1 <= b.X2+1.5 && b.X1 <= a.X2+1.5 && a.Y1 <= b.Y2+1.5 && b.Y1 <= a.Y2+1.5
 }
 
-// Connected ruled cells become real Word tables. Missing vertical walls become
-// gridSpan; missing horizontal walls become vMerge. Unruled text stays text.
-func layout(p Page) (Layout, error) {
-	if err := p.validate(); err != nil {
-		return Layout{}, err
-	}
-	p.Spans = append([]Span(nil), p.Spans...)
+// maxBorders bounds the cell search; past it a page's rules (sheet music
+// staves, hatching) are not a table.
+const maxBorders = 2500
+
+// borders are the rules that can bound a table cell: long horizontals and
+// tall verticals, less underlines.
+func borders(p Page) []Segment {
 	var walls []Segment
 	for _, s := range p.Segments {
 		if s = norm(s); s.Y2-s.Y1 > 10 && s.X2-s.X1 < 1 {
@@ -352,7 +367,18 @@ func layout(p Page) (Layout, error) {
 			segments = append(segments, s)
 		}
 	}
-	if len(segments) > 2500 {
+	return segments
+}
+
+// Connected ruled cells become real Word tables. Missing vertical walls become
+// gridSpan; missing horizontal walls become vMerge. Unruled text stays text.
+func layout(p Page) (Layout, error) {
+	if err := p.validate(); err != nil {
+		return Layout{}, err
+	}
+	p.Spans = append([]Span(nil), p.Spans...)
+	segments := borders(p)
+	if len(segments) > maxBorders { // sanitize already dropped them
 		return Layout{}, fmt.Errorf("too many table borders")
 	}
 	parent := make([]int, len(segments))
@@ -475,4 +501,54 @@ grids:
 	result.Items = bands(blocks(lines(free), result.Tables), result.Tables)
 	result.Images = p.Images
 	return result, nil
+}
+
+var (
+	leaderDots = regexp.MustCompile(`(?:\s*[.·…]){4,}\s*$`)
+	pageRef    = regexp.MustCompile(`(?i)^\s*(?:[0-9]{1,4}|[ivxlcdm]{1,7}|[A-Z]-?[0-9]{1,3})\s*$`)
+)
+
+// leaders turns drawn leader dots before a line's closing page number
+// ("Background ........ 4") into a right tab with a dot leader at the
+// number's right edge: Word fills the room exactly, where drawn dots in
+// Word's metrics run a little long and wrap the number onto a new line.
+func leaders(spans []Span) []Span {
+	n := len(spans)
+	if n < 2 || !pageRef.MatchString(spans[n-1].Text) {
+		return spans
+	}
+	dots := spans[n-2]
+	loc := leaderDots.FindStringIndex(dots.Text)
+	if loc == nil {
+		return spans
+	}
+	out := slices.Clone(spans[:n-2])
+	if head := strings.TrimRight(dots.Text[:loc[0]], " "); head != "" {
+		// The title keeps its share of the span's width, by Word's metrics.
+		full, kept := emsIn(dots, dots.Text), emsIn(dots, head)
+		dots.Text, dots.Width = head, dots.Width*kept/max(full, 1e-9)
+		out = append(out, dots)
+	}
+	number := spans[n-1]
+	number.Leader = true
+	return append(out, number)
+}
+
+// emsIn is text's width in ems in the family Word lays s out in, or its rune
+// count where that family's metrics are unknown.
+func emsIn(s Span, text string) float64 {
+	advances, known := faceAdvances[face(wordFamily(s), s)]
+	ems := 0.0
+	for _, r := range text {
+		a := uint16(0)
+		if known {
+			a = advance(advances, r)
+		}
+		if a > 0 {
+			ems += float64(a) / 1000
+		} else {
+			ems += 0.5
+		}
+	}
+	return ems
 }

@@ -3,6 +3,7 @@ package verso
 import (
 	"math"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -119,8 +120,39 @@ func (l Line) firstWord() float64 {
 	return last.X + last.Width - start + 0.25*last.Size
 }
 
+// stretched reports a line justified by word spacing: every gap after a
+// drawn space is wider again, by one amount, across at least three gaps; or
+// its spans' spaces are drawn wider than Word's by a justified line's
+// stretch (a tenth of an em or more each, over at least three spaces).
+func (l Line) stretched() bool {
+	var extra []float64
+	spaces, stretch := 0, 0.0
+	for i, s := range l.Spans {
+		if i > 0 && strings.HasSuffix(l.Spans[i-1].Text, " ") {
+			extra = append(extra, gap(l.Spans[i-1], s))
+		}
+		if n := strings.Count(strings.TrimSpace(s.Text), " "); n > 0 {
+			if natural, ok := naturalWidth(s); ok {
+				spaces, stretch = spaces+n, stretch+s.Width-natural
+			}
+		}
+	}
+	if spaces >= 3 && stretch/float64(spaces) >= 0.1*l.size() && stretch/float64(spaces) <= 2*l.size() {
+		return true
+	}
+	if len(extra) < 3 {
+		return false
+	}
+	lo, hi := slices.Min(extra), slices.Max(extra)
+	return lo > 0.1*l.size() && hi-lo < 0.05*l.size()
+}
+
 // marked reports a line that starts with a list marker and a tab.
 func (l Line) marked() bool { _, ok := l.hang(); return ok }
+
+func (l Line) leader() bool {
+	return slices.ContainsFunc(l.Spans, func(s Span) bool { return s.Leader })
+}
 
 // hang is where a list item's text starts: the span after its marker's tab.
 func (l Line) hang() (float64, bool) {
@@ -129,6 +161,8 @@ func (l Line) hang() (float64, bool) {
 	}
 	return 0, false
 }
+
+var sentenceEnd = regexp.MustCompile(`[.:;!?][)"”’\]]*\s*$`)
 
 var listMarker = regexp.MustCompile(`^\s*(?:[\x{2022}\x{25CF}\x{25AA}\x{25E6}\x{2023}\x{2043}\x{F0B7}\x{F0A7}\x{2013}\-\*]|\(?(?:\d{1,3}|[a-zA-Z]|[ivxlcIVXLC]{1,5})[.)](?:\d{1,3}[.)]?)*|\d{1,3}(?:\.\d{1,3})+)\s`)
 
@@ -222,9 +256,11 @@ func paragraphs(lines []Line, left, right float64) []Paragraph {
 	for i := 1; i < len(lines); i++ {
 		gaps[i] = lines[i].Baseline - lines[i-1].Baseline
 	}
-	// A gap is a paragraph break when it is clearly wider than the gaps of
-	// the neighbouring lines in the same size: one pitch per block or per
-	// size fails where dense small print and larger text share a column.
+	// A gap is a paragraph break when it is clearly wider than a gap of a
+	// neighbouring line in the same size: one pitch per block or per size
+	// fails where dense small print and larger text share a column. One
+	// narrower neighbour is enough: around a one-line heading both gaps are
+	// breaks.
 	wider := func(i int) bool {
 		size := lines[i].size()
 		tol := math.Max(1.5, 0.35*size)
@@ -234,17 +270,33 @@ func paragraphs(lines []Line, left, right float64) []Paragraph {
 				continue
 			}
 			neighbours++
-			if gaps[i] <= gaps[j]+tol || gaps[i] <= 1.05*gaps[j] {
-				return false
+			if gaps[i] > gaps[j]+tol && gaps[i] > 1.05*gaps[j] {
+				return true
 			}
 		}
-		return neighbours > 0 || gaps[i] > 1.6*size+tol
+		return neighbours == 0 && gaps[i] > 1.6*size+tol
 	}
 	var all []float64
 	for _, g := range gaps[1:] {
 		all = append(all, g)
 	}
 	blockPitch := median(all)
+	// Justification stretches every line but a paragraph's last to the
+	// column edge, so in a justified column a short line that ends a sentence
+	// after lines that reach the edge ends its paragraph, even when the next
+	// word would not have fit ("Article 8" after a sentence ending near the
+	// edge). A short line mid-sentence is a manual line break.
+	atEdge := func(l Line) bool { return math.Abs(l.right()-right) <= 1.5 }
+	edge := 0
+	for _, l := range lines[:max(0, len(lines)-1)] {
+		if atEdge(l) {
+			edge++
+		}
+	}
+	justifiedColumn := edge >= 3 && 3*edge >= len(lines)
+	// A line that fills the column mid-sentence wraps: "within thirty" then
+	// "(30) days" is the sentence going on, not a list item.
+	wrapped := func(l Line) bool { return atEdge(l) && !sentenceEnd.MatchString(l.text()) }
 	var out [][]Line
 	for i, l := range lines {
 		if i == 0 {
@@ -258,7 +310,9 @@ func paragraphs(lines []Line, left, right float64) []Paragraph {
 		split := wider(i) ||
 			math.Abs(l.size()-prev.size()) > 0.15*size ||
 			right-prev.right() > l.firstWord()+0.5 ||
-			listMarker.MatchString(l.text()) || l.marked()
+			listMarker.MatchString(l.text()) && !wrapped(prev) || l.marked() ||
+			prev.leader() || l.leader() || // a contents entry is its own paragraph
+			justifiedColumn && len(current) >= 2 && right-prev.right() > tol && sentenceEnd.MatchString(prev.text()) && !slices.ContainsFunc(current[:len(current)-1], func(l Line) bool { return !atEdge(l) })
 		// A list item's next line starting where its text starts (after the
 		// bullet's tab) is the item continuing, whatever the right edge says:
 		// list styles often wrap short of the body's margin.
@@ -290,7 +344,8 @@ func paragraphs(lines []Line, left, right float64) []Paragraph {
 	// column, a first line that reaches the column edge was justified too.
 	for i, p := range result {
 		if justified && len(p.Lines) == 2 && p.Align == "left" && math.Abs(p.Lines[0].right()-right) <= 1.5 {
-			result[i].Align = "both"
+			// Justified lines end at the column edge (as in shape).
+			result[i].Align, result[i].Right = "both", math.Max(p.Lines[0].right(), p.Lines[1].right())+0.25
 		}
 	}
 	return result
@@ -307,8 +362,8 @@ func shape(ls []Line, left, right, blockPitch float64) Paragraph {
 	} else {
 		p.Pitch = 1.2 * size
 	}
-	p.Pitch = math.Max(p.Pitch, ls[0].Height)
 	if n == 1 {
+		p.Pitch = math.Max(p.Pitch, ls[0].Height) // a guess: room for the glyph box
 		// One line never needs to wrap; give it room so Word's metrics cannot
 		// push its last word down, and keep its x as a plain indent.
 		p.Left, p.Right = ls[0].X, math.Max(right, ls[0].right())+2*size
@@ -328,14 +383,18 @@ func shape(ls []Line, left, right, blockPitch float64) Paragraph {
 		clo, chi = math.Min(clo, c), math.Max(chi, c)
 		if i < n-1 {
 			rlo, rhi = math.Min(rlo, l.right()), math.Max(rhi, l.right())
-			slack = math.Min(slack, ls[i+1].firstWord())
 		}
 	}
-	// Room past the widest line, but less than any next line's first word, so
-	// Word breaks where the PDF broke even when its font metrics differ a bit.
-	slack = math.Max(0.5, math.Min(0.5*slack, size))
+	// Room past the widest line, so Word breaks where the PDF broke even when
+	// its metrics run a little long, but short of where any line would take
+	// the next line's first word: a shorter line has that much more room.
+	for i := range n - 1 {
+		slack = math.Min(slack, ls[i].right()+ls[i+1].firstWord()-maxRight)
+	}
+	slack = math.Max(0, math.Min(0.6*slack, size))
+	stretched := !slices.ContainsFunc(ls[:n-1], func(l Line) bool { return !l.stretched() })
 	switch {
-	case n >= 3 && rhi-rlo <= 1.5 && spreadL <= 1.5:
+	case (n >= 3 || stretched) && rhi-rlo <= 1.5 && spreadL <= 1.5:
 		p.Align = "both"
 	case chi-clo <= 2 && (spreadL > 3 || ls[0].X-lo > 3):
 		p.Align = "center"
@@ -345,6 +404,11 @@ func shape(ls []Line, left, right, blockPitch float64) Paragraph {
 	p.Left, p.Right = lo, maxRight+slack
 	p.Indent = ls[0].X - lo
 	switch p.Align {
+	case "both":
+		// Justified lines end near the column edge: room past it lets Word
+		// pull up a short word the PDF put on the next line, and too little
+		// breaks a line whose Word widths run a rounding error long.
+		p.Right = maxRight + 0.25
 	case "center":
 		half := (maxRight-math.Min(lo, ls[0].X))/2 + slack
 		mid := (clo + chi) / 2

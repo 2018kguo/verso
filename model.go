@@ -25,6 +25,7 @@ type Span struct {
 	Serif, Mono             bool    // the PDF font's flags, for Word's fallback
 	Rise                    float64 `json:"-"` // superscript or subscript offset, points up
 	Underline               bool    `json:"-"` // set from a rule under the span
+	PageNumber              bool    `json:"-"` // written as Word's PAGE field
 }
 type Segment struct{ X1, Y1, X2, Y2 float64 }
 type Image struct {

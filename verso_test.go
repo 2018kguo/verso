@@ -8,12 +8,16 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"image"
+	"image/png"
 	"io"
+	"maps"
 	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -476,9 +480,17 @@ func TestRenderedPaymentGeometry(t *testing.T) {
 	}
 	dir := t.TempDir()
 	input, output := filepath.Join(dir, "source.pdf"), filepath.Join(dir, "converted.docx")
-	fixturePDF(t, input, 2, false)
+	// A running head and a counting foot move to header and footer parts,
+	// which must not push the body.
+	fixturePDF(t, input, 3, false, func(c string) string {
+		n := regexp.MustCompile(`Example report (\d+)`).FindStringSubmatch(c)[1]
+		return c + "BT /F1 9 Tf 260 770 Td (CONFIDENTIAL) Tj ET\nBT /F1 9 Tf 290 30 Td (Page " + n + ") Tj ET\n"
+	})
 	if _, err := Convert(context.Background(), input, output, opts); err != nil {
 		t.Fatal(err)
+	}
+	if parts := docParts(t, mustRead(t, output)); strings.Contains(parts["word/document.xml"], "CONFIDENTIAL") {
+		t.Fatal("running head left in the body")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -533,7 +545,7 @@ func TestRenderedPaymentGeometry(t *testing.T) {
 	}
 	sourcePages, source := positions(input)
 	renderPages, render := positions(filepath.Join(dir, "converted.pdf"))
-	if sourcePages != renderPages || len(source) != 6 || len(render) != 6 {
+	if sourcePages != renderPages || len(source) != 9 || len(render) != 9 {
 		t.Fatalf("render lost pages/amounts: source=%d/%d output=%d/%d", sourcePages, len(source), renderPages, len(render))
 	}
 	for i, a := range source {
@@ -767,7 +779,7 @@ func TestFindRectoIgnoresWorkingDirectory(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(planted, "dist"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	os.WriteFile(filepath.Join(planted, "package.json"), []byte(`{"name":"@2018kguo/recto","version":"0.7.0"}`), 0o600)
+	os.WriteFile(filepath.Join(planted, "package.json"), []byte(`{"name":"@2018kguo/recto","version":"0.8.0"}`), 0o600)
 	os.WriteFile(filepath.Join(planted, "dist", "index.js"), []byte(`throw new Error("planted")`), 0o600)
 	t.Chdir(dir)
 	t.Setenv("VERSO_RECTO_MODULE", "")
@@ -863,4 +875,249 @@ func TestCellBordersAreNotUnderlines(t *testing.T) {
 			}
 		}
 	}
+}
+
+// Each image is its own region of the page render, encoded as a PNG Word
+// can decode: one image renders alone, several share one page render.
+func TestImagePixelsMatchTheirRegions(t *testing.T) {
+	opts := integrationOptions(t)
+	for _, count := range []int{1, 2} {
+		dir := t.TempDir()
+		input, output := filepath.Join(dir, "pics.pdf"), filepath.Join(dir, "pics.docx")
+		fixturePDF(t, input, 1, false, func(_ string) string {
+			b := "BT /F1 12 Tf 50 740 Td (Pictures) Tj ET\n"
+			for i := 0; i < count; i++ {
+				b += fmt.Sprintf("q 200 0 0 200 %d 300 cm /Im1 Do Q\n", 60+i*260)
+			}
+			return b
+		})
+		if _, err := Convert(context.Background(), input, output, opts); err != nil {
+			t.Fatal(err)
+		}
+		archive, err := zip.OpenReader(output)
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := 0
+		for _, f := range archive.File {
+			if !strings.HasSuffix(f.Name, ".png") {
+				continue
+			}
+			found++
+			r, _ := f.Open()
+			img, err := png.Decode(r)
+			r.Close()
+			if err != nil {
+				t.Fatalf("%s: %v", f.Name, err)
+			}
+			// Im1's rows, top first: red, green / blue, yellow.
+			bounds := img.Bounds()
+			want := map[[2]int][3]uint32{{1, 1}: {1, 0, 0}, {3, 1}: {0, 1, 0}, {1, 3}: {0, 0, 1}, {3, 3}: {1, 1, 0}}
+			for at, rgb := range want {
+				r, g, b, _ := img.At(bounds.Dx()*at[0]/4, bounds.Dy()*at[1]/4).RGBA()
+				if got := [3]uint32{r >> 15, g >> 15, b >> 15}; got != rgb {
+					t.Errorf("%d images, %s at %v: %v, want %v", count, f.Name, at, got, rgb)
+				}
+			}
+		}
+		archive.Close()
+		if found != count {
+			t.Fatalf("%d PNGs for %d images", found, count)
+		}
+	}
+}
+
+// A footer that counts pages becomes one footer part with a PAGE field, and a
+// constant head one header part; the body keeps only the page's own text.
+func TestRunningHeadsAndFeet(t *testing.T) {
+	page := func(i int, foot string) Page {
+		p := Page{Width: 612, Height: 792, Spans: []Span{span("CONFIDENTIAL", 250, 20, 90), span(fmt.Sprintf("Body text of section %c.", 'A'+i), 72, 300, 160)}}
+		if foot != "" {
+			p.Spans = append(p.Spans, span(foot, 280, 760, 50))
+		}
+		return p
+	}
+	for _, c := range []struct {
+		name  string
+		pages []Page
+		start string
+	}{
+		{"numbered from one", []Page{page(0, "Page 1"), page(1, "Page 2"), page(2, "Page 3")}, `<w:pgNumType w:start="1"/>`},
+		{"unnumbered cover", []Page{page(0, ""), page(1, "Page 1"), page(2, "Page 2"), page(3, "Page 3")}, `<w:pgNumType w:start="0"/>`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var out bytes.Buffer
+			if _, err := Write(&out, c.pages); err != nil {
+				t.Fatal(err)
+			}
+			parts := docParts(t, out.Bytes())
+			doc := parts["word/document.xml"]
+			last := fmt.Sprintf("section %c.", 'A'+len(c.pages)-1)
+			if strings.Contains(doc, "CONFIDENTIAL") || strings.Contains(doc, "Page ") || !strings.Contains(doc, last) {
+				t.Fatalf("running text left in the body: %s", doc)
+			}
+			if strings.Count(doc, "<w:headerReference") != len(c.pages) || strings.Count(doc, "<w:footerReference") != len(c.pages) || !strings.Contains(doc, c.start) {
+				t.Fatalf("sections: %s", doc)
+			}
+			var heads, feet int
+			for name, xml := range parts {
+				heads += strings.Count(xml, "CONFIDENTIAL")
+				if strings.HasPrefix(name, "word/footer") && strings.Contains(xml, `<w:fldSimple w:instr=" PAGE ">`) && strings.Contains(xml, ">Page </w:t>") {
+					feet++
+				}
+			}
+			if heads != 1 || feet != 1 {
+				t.Fatalf("%d header parts with the head, %d footers with a PAGE field", heads, feet)
+			}
+			if !strings.Contains(parts["[Content_Types].xml"], "wordprocessingml.footer+xml") {
+				t.Fatal("footer content type missing")
+			}
+			if opts := integrationOptions(t); opts.Validate != nil {
+				path := filepath.Join(t.TempDir(), "running.docx")
+				if err := os.WriteFile(path, out.Bytes(), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := opts.Validate(context.Background(), path); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+func mustRead(t *testing.T, path string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// Each case broke running-line detection once: the head or foot must leave
+// the body only when every page agrees, and nothing may be lost or doubled.
+func TestRunningLineEdgeCases(t *testing.T) {
+	doc := func(t *testing.T, pages []Page) map[string]string {
+		t.Helper()
+		var out bytes.Buffer
+		if _, err := Write(&out, pages); err != nil {
+			t.Fatal(err)
+		}
+		return docParts(t, out.Bytes())
+	}
+	pageWith := func(extra ...Span) Page {
+		return Page{Width: 612, Height: 792, Spans: append([]Span{span("Body text.", 72, 300, 60)}, extra...)}
+	}
+	everywhere := func(parts map[string]string, text string) (body, margins int) {
+		for name, xml := range parts {
+			n := strings.Count(xml, text)
+			if name == "word/document.xml" {
+				body += n
+			} else if strings.HasPrefix(name, "word/header") || strings.HasPrefix(name, "word/footer") {
+				margins += n
+			}
+		}
+		return
+	}
+	t.Run("literal # beside numbers stays in the body", func(t *testing.T) {
+		for _, feet := range [][]string{{"Item 5", "Item #", "Item 5"}, {"Item #", "Item 5", "Item 7"}} {
+			var pages []Page
+			for _, f := range feet {
+				pages = append(pages, pageWith(span(f, 280, 760, 40)))
+			}
+			parts := doc(t, pages)
+			for _, f := range feet {
+				if !strings.Contains(parts["word/document.xml"], ">"+f+"<") {
+					t.Fatalf("%v: %q left the document", feet, f)
+				}
+			}
+		}
+	})
+	t.Run("a header table keeps its text", func(t *testing.T) {
+		var pages []Page
+		for range 3 {
+			p := pageWith(span("SOP-001 Rev 2", 80, 20, 100))
+			p.Segments = []Segment{{70, 15, 70, 40}, {300, 15, 300, 40}, {70, 15, 300, 15}, {70, 40, 300, 40}}
+			pages = append(pages, p)
+		}
+		if body, _ := everywhere(doc(t, pages), "SOP-001"); body != 3 {
+			t.Fatalf("header table text in the body %d times, want 3", body)
+		}
+	})
+	t.Run("a raised mark moves with its head", func(t *testing.T) {
+		var pages []Page
+		for range 3 {
+			mark := Span{Box: Box{171, 18, 10, 7}, Text: "TM", Font: "Arial", Color: "000000", Size: 6, Baseline: 24}
+			pages = append(pages, pageWith(span("Acme Widgets", 100, 20, 70), mark))
+		}
+		if body, margins := everywhere(doc(t, pages), ">TM<"); body != 0 || margins != 1 {
+			t.Fatalf("TM in body %d, in margins %d", body, margins)
+		}
+	})
+	t.Run("an underlined head stays underlined", func(t *testing.T) {
+		var pages []Page
+		for range 3 {
+			p := pageWith(span("CONFIDENTIAL", 250, 20, 90))
+			p.Segments = []Segment{{250, 31.5, 340, 31.5}}
+			pages = append(pages, p)
+		}
+		for name, xml := range doc(t, pages) {
+			if strings.HasPrefix(name, "word/header") && strings.Contains(xml, "CONFIDENTIAL") && !strings.Contains(xml, `<w:u w:val="single"/>`) {
+				t.Fatal("underline lost")
+			}
+		}
+	})
+	t.Run("a mirrored head keeps its side", func(t *testing.T) {
+		var pages []Page
+		for i := range 4 {
+			pages = append(pages, pageWith(span("Chapter One", []float64{72, 450}[i%2], 20, 80)))
+		}
+		lefts := 0
+		for name, xml := range doc(t, pages) {
+			if strings.HasPrefix(name, "word/header") && (strings.Contains(xml, `w:left="1440"`) || strings.Contains(xml, `w:left="9000"`)) {
+				lefts++
+			}
+		}
+		if lefts != 2 {
+			t.Fatalf("%d header positions, want 2", lefts)
+		}
+	})
+	t.Run("a number split across spans is not a page field", func(t *testing.T) {
+		var pages []Page
+		for i := range 3 {
+			n := fmt.Sprint(10 + i)
+			pages = append(pages, pageWith(span("Page "+n[:1], 280, 760, 30), span(n[1:], 310, 760, 5)))
+		}
+		if strings.Contains(strings.Join(slices.Collect(maps.Values(doc(t, pages))), ""), "fldSimple") {
+			t.Fatal("PAGE field from a split number")
+		}
+	})
+}
+
+// Stored images carry their sizes in the local header (no data descriptor),
+// which streaming ZIP readers require.
+func TestStoredImagesHaveLocalSizes(t *testing.T) {
+	p := Page{Width: 612, Height: 792, Spans: []Span{span("Logo", 72, 72, 40)}, Images: []Image{{Box: Box{72, 100, 10, 10}, PNG: pngPixel(t)}}}
+	var out bytes.Buffer
+	if _, err := Write(&out, []Page{p}); err != nil {
+		t.Fatal(err)
+	}
+	z, err := zip.NewReader(bytes.NewReader(out.Bytes()), int64(out.Len()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range z.File {
+		if strings.HasSuffix(f.Name, ".png") && (f.Method != zip.Store || f.Flags&0x8 != 0) {
+			t.Fatalf("%s: method %d flags %#x", f.Name, f.Method, f.Flags)
+		}
+	}
+}
+
+func pngPixel(t *testing.T) []byte {
+	t.Helper()
+	var b bytes.Buffer
+	if err := png.Encode(&b, image.NewRGBA(image.Rect(0, 0, 1, 1))); err != nil {
+		t.Fatal(err)
+	}
+	return b.Bytes()
 }

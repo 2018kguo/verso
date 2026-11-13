@@ -4,7 +4,7 @@ Convert a PDF into a Word document you can edit, redline and send back, and
 that Microsoft's own validator accepts.
 
 ```sh
-npm install -g @2018kguo/recto@0.7    # PDF engine (WebAssembly, no native deps); Node 24+
+npm install -g @2018kguo/recto@0.8    # PDF engine (WebAssembly, no native deps); Node 24+
 go install github.com/2018kguo/verso/cmd/verso@latest
 verso report.pdf report.docx          # prints a JSON report; exits 1 if it refuses
 ```
@@ -49,7 +49,7 @@ Round trip of 22 Word documents (contracts, statements of work, reports):
 
 | Converter | Valid OOXML | Text recall | Ink F1 | ¶ recall | Pages | Median |
 |---|---|---|---|---|---|---|
-| **verso** | **20/20** (2 RTL refused) | **1.000** | **0.879** | **0.776** | 18/20 | **412 ms** |
+| **verso** | **20/20** (2 RTL refused) | **1.000** | **0.895** | **0.790** | 19/20 | **410 ms** |
 | pdf2docx 0.5.13 | 0/22 | 0.943 | 0.689 | 0.622 | 19/22 | 866 ms |
 | LibreOffice 26.2 (`soffice --convert-to docx`) | 0/22 | 0.924 | 0.350 | 0.330 | 22/22 | 1926 ms |
 
@@ -59,7 +59,7 @@ own render:
 
 | Converter | Valid OOXML | Text recall | Ink F1 | Median |
 |---|---|---|---|---|
-| **verso** | **21/21** | 0.996 | **0.782** | **353 ms** |
+| **verso** | **21/21** | 0.996 | **0.783** | **386 ms** |
 | pdf2docx 0.5.13 | 0/20 (1 failed) | 0.997 | 0.552 | 793 ms |
 | LibreOffice | 0/21 | 1.000 | 0.182 | 1911 ms |
 
@@ -72,7 +72,9 @@ own render:
 - **Pages**: documents whose round trip has the source's page count.
 
 Robustness was tested on 300 PDFs sampled from a public corpus of real-world
-files (forms, filings, scans, slide decks, CJK, broken producers). 273 convert and validate. The other 27 are refused with a reason: 23 are
+files (forms, filings, scans, slide decks, CJK, broken producers). 273
+convert and validate, in 301 s for all 300 (p95 2.9 s). The other 27 are
+refused with a reason: 23 are
 entirely scanned (OCR is out of scope), 2 contain right-to-left text, and 2
 are password-protected. There were no crashes and no invalid output.
 
@@ -111,13 +113,15 @@ go build -o verso ./cmd/verso && go build -o verso-bench ./bench
    size. Paragraph spacing comes from absolute positions, so errors
    don't accumulate down the page. PostScript font names map to their family
    names, and `fontTable.xml` names an Office substitute for fonts Word lacks.
-   Pages taller than 22 inches are scaled to fit.
+   Pages taller than 22 inches are scaled to fit. Lines that repeat in the
+   top or bottom margin on three or more pages become a Word header or
+   footer, a counting page number becomes a `PAGE` field.
 6. **Validate.** Optionally, run the [Open XML SDK](https://github.com/dotnet/Open-XML-SDK)
    validator (`validator/`, .NET 8). The output is written only if the SDK
    accepts it.
 
-The output does not include headers and footers as Word parts, bidirectional
-text, form fields, or comments for PDF annotations. Each of these produces a
+The output does not include bidirectional text, form fields, or comments for
+PDF annotations. Each of these produces a
 warning or a refusal; none is dropped silently.
 
 ## Library

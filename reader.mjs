@@ -1,7 +1,7 @@
 // Geometry only. Layout and all OOXML generation belong to the Go converter.
 import fs from "node:fs";
 import { pathToFileURL } from "node:url";
-import { deflateSync } from "node:zlib";
+import { crc32, deflateSync } from "node:zlib";
 
 const [file, entry, maxPagesString] = process.argv.slice(1);
 const { openPdf } = await import(pathToFileURL(entry).href);
@@ -12,18 +12,6 @@ const doc = await openPdf(new Uint8Array(fs.readFileSync(file))).catch(
   }
 );
 const say = (value) => fs.writeSync(1, `${JSON.stringify(value)}\n`);
-
-function crc32(buffer) {
-  let crc = -1;
-  for (const byte of buffer) {
-    crc ^= byte;
-    for (let i = 0; i < 8; i++) {
-      crc = (crc >>> 1) ^ (0xed_b8_83_20 & -(crc & 1));
-    }
-  }
-  const signed = crc ^ -1;
-  return signed < 0 ? signed + 4_294_967_296 : signed;
-}
 
 // level reports a glyph whose run advances along a horizontal baseline:
 // its neighbour in the same text object sits beside it, not above.
@@ -149,8 +137,8 @@ function clusters(boxes, pad) {
   return [...out.values()];
 }
 
-// A page region as a PNG, cut to the page; null when nothing is left.
-function regionImage(pdf, pageIndex, info, b) {
+// A page region cut to the page; null when nothing is left.
+function clip(info, b) {
   const x = Math.max(0, b.x);
   const y = Math.max(0, b.y);
   const box = {
@@ -159,15 +147,43 @@ function regionImage(pdf, pageIndex, info, b) {
     x,
     y,
   };
-  if (box.width < 0.5 || box.height < 0.5) {
-    return null;
-  }
-  const bitmap = pdf.render(pageIndex, {
+  return box.width < 0.5 || box.height < 0.5 ? null : box;
+}
+
+// A region render's pixels are the whole-page render's at the same scale
+// (Recto's contract), and in Recto 0.7 it costs about as much, so a page with
+// several regions renders once and crops. One region renders alone.
+function pageImages(pdf, pageIndex, info, boxes) {
+  const options = {
     maxHeight: 2048,
-    region: box,
     width: Math.min(2048, Math.ceil(info.width * 1.5)),
+  };
+  if (boxes.length < 2) {
+    return boxes.map((box) => ({
+      ...box,
+      png: png(pdf.render(pageIndex, { ...options, region: box })),
+    }));
+  }
+  const page = pdf.render(pageIndex, options);
+  const sx = page.width / info.width;
+  const sy = page.height / info.height;
+  return boxes.map((box) => {
+    const x = Math.floor(box.x * sx);
+    const y = Math.floor(box.y * sy);
+    const width = Math.min(page.width, Math.ceil((box.x + box.width) * sx)) - x;
+    const height =
+      Math.min(page.height, Math.ceil((box.y + box.height) * sy)) - y;
+    return { ...box, png: png(crop(page, x, y, width, height)) };
   });
-  return { ...box, png: png(bitmap) };
+}
+
+function crop(bitmap, x, y, width, height) {
+  const rgba = new Uint8Array(width * height * 4);
+  for (let row = 0; row < height; row++) {
+    const start = ((y + row) * bitmap.width + x) * 4;
+    rgba.set(bitmap.rgba.subarray(start, start + width * 4), row * width * 4);
+  }
+  return { width, height, rgba, truncated: bitmap.truncated };
 }
 
 // Controls XML cannot carry (tab, newline and return can).
@@ -180,13 +196,20 @@ function png(bitmap) {
   if (bitmap.truncated) {
     throw new Error("image render truncated");
   }
+  // Recto's bitmaps are opaque: RGB, with PNG's Up filter (each byte less
+  // the one above it), which turns the rows of a rendered page into runs of
+  // zeros that deflate at a fast level squeezes well.
   const { width, height, rgba } = bitmap;
-  const rows = Buffer.alloc(height * (1 + width * 4));
-  for (let y = 0; y < height; y++) {
-    Buffer.from(rgba.buffer, rgba.byteOffset + y * width * 4, width * 4).copy(
-      rows,
-      y * (width * 4 + 1) + 1
-    );
+  const stride = 1 + width * 3;
+  const rows = Buffer.alloc(height * stride);
+  for (let i = 0, o = 0, y = 0; y < height; y++) {
+    rows[o++] = 2;
+    for (let x = 0; x < width; x++, i += 4) {
+      const up = i - width * 4;
+      rows[o++] = y ? rgba[i] - rgba[up] : rgba[i];
+      rows[o++] = y ? rgba[i + 1] - rgba[up + 1] : rgba[i + 1];
+      rows[o++] = y ? rgba[i + 2] - rgba[up + 2] : rgba[i + 2];
+    }
   }
   const chunk = (name, data) => {
     const type = Buffer.from(name);
@@ -200,11 +223,11 @@ function png(bitmap) {
   header.writeUInt32BE(width);
   header.writeUInt32BE(height, 4);
   header[8] = 8;
-  header[9] = 6;
+  header[9] = 2;
   return Buffer.concat([
     Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
     chunk("IHDR", header),
-    chunk("IDAT", deflateSync(rows)),
+    chunk("IDAT", deflateSync(rows, { level: 3 })),
     chunk("IEND", Buffer.alloc(0)),
   ]).toString("base64");
 }
@@ -217,6 +240,17 @@ try {
     throw new Error("PDF structure truncated");
   }
   let scans = 0;
+  // Rendering and PNG encoding dominate conversion time, so a page is encoded
+  // only when emitted, and scans wait while every page so far is one: an
+  // all-scan document is refused without encoding a page.
+  const waiting = [];
+  const emit = ({ info, pageIndex, images, ...rest }) =>
+    say({
+      width: info.width,
+      height: info.height,
+      ...rest,
+      images: pageImages(doc, pageIndex, info, images),
+    });
   for (let pageIndex = 0; pageIndex < doc.pageCount; pageIndex++) {
     const info = doc.pageInfo(pageIndex);
     // Angles are in the content frame; /Rotate turns the page clockwise for
@@ -430,9 +464,9 @@ try {
     const images = [];
     let overlap = false;
     const addImage = (b) => {
-      const im = regionImage(doc, pageIndex, info, b);
-      if (im) {
-        images.push(im);
+      const box = clip(info, b);
+      if (box) {
+        images.push(box);
       }
     };
     const placed = [];
@@ -615,14 +649,15 @@ try {
       );
       scans++;
     }
-    say({
-      width: info.width,
-      height: info.height,
-      spans,
-      segments,
-      images,
-      warnings,
-    });
+    const page = { info, pageIndex, spans, segments, images, warnings };
+    if (scans === pageIndex + 1) {
+      waiting.push(page); // all scans so far: maybe a refusal
+      continue;
+    }
+    for (const pending of waiting.splice(0)) {
+      emit(pending);
+    }
+    emit(page);
   }
   if (scans === doc.pageCount) {
     throw new Error("scanned document: every page is an image; OCR required");

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -216,5 +217,31 @@ func TestParagraphRecallIgnoresNumbering(t *testing.T) {
 	s := scoreParagraphs("If any dispute arises the parties shall meet\nCustomer may terminate the agreement in part\n", "1.1.1 If any dispute arises the parties shall meet\nCustomer may terminate\nthe agreement in part\n")
 	if s.Truth != 2 || s.Intact != 1 {
 		t.Fatalf("%+v: spelled-out numbering is intact, a split paragraph is not", s)
+	}
+}
+
+// A header part shows on every section that names or inherits it, its PAGE
+// field reading each section's own number.
+func TestHeaderTextCountsPerSection(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "sections.docx")
+	f, e := os.Create(p)
+	if e != nil {
+		t.Fatal(e)
+	}
+	z := zip.NewWriter(f)
+	part := func(name, body string) {
+		w, _ := z.Create(name)
+		io.WriteString(w, body)
+	}
+	const r = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+	sect := `<w:sectPr><w:footerReference w:type="default" r:id="rId1"/><w:pgNumType w:start="4"/></w:sectPr>`
+	part("word/document.xml", fmt.Sprintf(`<w:document xmlns:w="%s" xmlns:r="%s"><w:body><w:p><w:pPr>%s</w:pPr><w:r><w:t>one</w:t></w:r></w:p><w:p><w:r><w:t>two</w:t></w:r></w:p><w:sectPr/></w:body></w:document>`, wordNS, r, sect))
+	part("word/_rels/document.xml.rels", `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="footer" Target="footer1.xml"/></Relationships>`)
+	part("word/footer1.xml", fmt.Sprintf(`<w:ftr xmlns:w="%s"><w:p><w:r><w:t>Page </w:t></w:r><w:fldSimple w:instr=" PAGE "><w:r><w:t>1</w:t></w:r></w:fldSimple></w:p></w:ftr>`, wordNS))
+	z.Close()
+	f.Close()
+	s, e := wordText(p)
+	if got := strings.Join(tokens(s), " "); e != nil || got != "one two page 4 page 5" {
+		t.Fatalf("%q %v", got, e)
 	}
 }

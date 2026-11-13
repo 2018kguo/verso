@@ -11,6 +11,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"strconv"
 	"strings"
 	"unicode"
 )
@@ -78,6 +79,9 @@ func scoreText(source, output string) textScore {
 
 const wordNS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 
+// wordText is the text a reader sees: the body, notes, and each header and
+// footer once per section that shows it (a section without its own reference
+// inherits the previous one), with a PAGE field reading that section's number.
 func wordText(path string) (string, error) {
 	z, err := zip.OpenReader(path)
 	if err != nil {
@@ -87,23 +91,17 @@ func wordText(path string) (string, error) {
 	if len(z.File) > 10000 {
 		return "", errors.New("too many ZIP parts")
 	}
-	var b strings.Builder
+	parts := map[string]string{}
+	seen := map[string]bool{}
 	var total uint64
-	found := false
-	names := map[string]bool{}
 	for _, f := range z.File {
-		if names[f.Name] {
+		if seen[f.Name] {
 			return "", errors.New("duplicate ZIP part")
 		}
-		names[f.Name] = true
-		if f.Name != "word/document.xml" && !strings.HasPrefix(f.Name, "word/header") && !strings.HasPrefix(f.Name, "word/footer") && f.Name != "word/footnotes.xml" && f.Name != "word/endnotes.xml" {
+		seen[f.Name] = true
+		wanted := f.Name == "word/document.xml" || strings.HasPrefix(f.Name, "word/header") || strings.HasPrefix(f.Name, "word/footer") || f.Name == "word/footnotes.xml" || f.Name == "word/endnotes.xml"
+		if !(wanted && strings.HasSuffix(f.Name, ".xml")) && f.Name != "word/_rels/document.xml.rels" {
 			continue
-		}
-		if !strings.HasSuffix(f.Name, ".xml") {
-			continue
-		}
-		if f.Name == "word/document.xml" {
-			found = true
 		}
 		total += f.UncompressedSize64
 		if total > 64<<20 {
@@ -113,45 +111,152 @@ func wordText(path string) (string, error) {
 		if e != nil {
 			return "", e
 		}
-		d := xml.NewDecoder(io.LimitReader(r, 64<<20))
-		inText := false
-		for {
-			t, e := d.Token()
-			if e == io.EOF {
-				break
-			}
-			if e != nil {
-				r.Close()
-				return "", e
-			}
-			switch t := t.(type) {
-			case xml.StartElement:
-				if t.Name.Space == wordNS && t.Name.Local == "t" {
-					inText = true
-				}
-				if t.Name.Space == wordNS && (t.Name.Local == "tab" || t.Name.Local == "br") {
-					b.WriteByte(' ')
-				}
-			case xml.EndElement:
-				if t.Name.Space == wordNS && t.Name.Local == "t" {
-					inText = false
-				}
-				if t.Name.Space == wordNS && (t.Name.Local == "p" || t.Name.Local == "tc") {
-					b.WriteByte('\n')
-				}
-			case xml.CharData:
-				if inText {
-					b.Write(t)
-				}
-			}
-		}
+		data, e := io.ReadAll(io.LimitReader(r, 64<<20))
 		r.Close()
-		b.WriteByte(' ')
+		if e != nil {
+			return "", e
+		}
+		parts[f.Name] = string(data)
 	}
-	if !found {
+	body, ok := parts["word/document.xml"]
+	if !ok {
 		return "", errors.New("no main document")
 	}
+	var b strings.Builder
+	sections, err := partText(&b, body, false)
+	if err != nil {
+		return "", err
+	}
+	for _, name := range []string{"word/footnotes.xml", "word/endnotes.xml"} {
+		if _, err := partText(&b, parts[name], false); err != nil {
+			return "", err
+		}
+	}
+	targets := map[string]string{}
+	var rels struct {
+		Items []struct {
+			ID     string `xml:"Id,attr"`
+			Target string `xml:"Target,attr"`
+		} `xml:"Relationship"`
+	}
+	if xml.Unmarshal([]byte(parts["word/_rels/document.xml.rels"]), &rels) == nil {
+		for _, r := range rels.Items {
+			targets[r.ID] = "word/" + strings.TrimPrefix(r.Target, "/word/")
+		}
+	}
+	margins := map[string]string{} // relationship id -> text, \x00 at PAGE
+	for id, target := range targets {
+		var m strings.Builder
+		if _, err := partText(&m, parts[target], true); err != nil {
+			return "", err
+		}
+		margins[id] = m.String()
+	}
+	// ponytail: one count per section, exact for one-section-per-page output;
+	// a multi-page section's header counts once (pages per section need layout).
+	page := 1
+	var header, footer string
+	for _, sec := range sections {
+		if sec.start >= 0 {
+			page = sec.start
+		}
+		if sec.header != "" {
+			header = sec.header
+		}
+		if sec.footer != "" {
+			footer = sec.footer
+		}
+		for _, id := range []string{header, footer} {
+			b.WriteString(strings.ReplaceAll(margins[id], "\x00", fmt.Sprint(page)))
+		}
+		page++
+	}
 	return b.String(), nil
+}
+
+func attr(t xml.StartElement, local string) string {
+	for _, a := range t.Attr {
+		if a.Name.Local == local {
+			return a.Value
+		}
+	}
+	return ""
+}
+
+type sectionRefs struct {
+	header, footer string // default header and footer relationship ids
+	start          int    // pgNumType start, or -1
+}
+
+// partText appends a part's text and returns its sections. With numbered,
+// each PAGE field's result is \x00, for the caller to number.
+func partText(b *strings.Builder, data string, numbered bool) ([]sectionRefs, error) {
+	if data == "" {
+		return nil, nil
+	}
+	d := xml.NewDecoder(strings.NewReader(data))
+	var sections []sectionRefs
+	inText, inPage := false, false
+	for {
+		t, e := d.Token()
+		if e == io.EOF {
+			break
+		}
+		if e != nil {
+			return nil, e
+		}
+		switch t := t.(type) {
+		case xml.StartElement:
+			if t.Name.Space != wordNS {
+				continue
+			}
+			switch t.Name.Local {
+			case "t":
+				inText = true
+			case "tab", "br":
+				b.WriteByte(' ')
+			case "fldSimple":
+				if numbered && strings.TrimSpace(attr(t, "instr")) == "PAGE" {
+					inPage = true
+					b.WriteByte(0)
+				}
+			case "sectPrChange":
+				d.Skip() // a tracked change's old section properties
+			case "sectPr":
+				sections = append(sections, sectionRefs{start: -1})
+			case "headerReference", "footerReference":
+				if n := len(sections); n > 0 && attr(t, "type") == "default" {
+					if t.Name.Local == "headerReference" {
+						sections[n-1].header = attr(t, "id")
+					} else {
+						sections[n-1].footer = attr(t, "id")
+					}
+				}
+			case "pgNumType":
+				if v, err := strconv.Atoi(attr(t, "start")); err == nil && len(sections) > 0 {
+					sections[len(sections)-1].start = v
+				}
+			}
+		case xml.EndElement:
+			if t.Name.Space != wordNS {
+				continue
+			}
+			switch t.Name.Local {
+			case "t":
+				inText = false
+			case "fldSimple":
+				inPage = false
+			case "p", "tc":
+				b.WriteByte('\n')
+			}
+		case xml.CharData:
+			if inText && !inPage {
+				b.Write(t)
+			}
+		}
+	}
+	b.WriteByte(' ')
+	return sections, nil
 }
 
 type boxWord struct {

@@ -6,9 +6,11 @@ import (
 	"context"
 	"encoding/xml"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"math"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -153,6 +155,10 @@ func (w *writer) span(b *strings.Builder, s Span) {
 		w.fonts[family] = s
 	}
 	f := esc(family)
+	if s.PageNumber {
+		b.WriteString(`<w:fldSimple w:instr=" PAGE ">`)
+		defer b.WriteString(`</w:fldSimple>`)
+	}
 	fmt.Fprintf(b, `<w:r><w:rPr><w:rFonts w:ascii="%s" w:hAnsi="%s" w:eastAsia="%s" w:cs="%s"/>`, f, f, f, f)
 	if s.Weight >= 600 {
 		b.WriteString(`<w:b/><w:bCs/>`)
@@ -405,8 +411,20 @@ func (w *writer) columns(b *strings.Builder, cols []Block, top float64) float64 
 	return bottom
 }
 
-func section(p Page) string {
-	return fmt.Sprintf(`<w:sectPr><w:type w:val="nextPage"/><w:pgSz w:w="%d" w:h="%d"/><w:pgMar w:top="0" w:right="0" w:bottom="0" w:left="0" w:header="0" w:footer="0" w:gutter="0"/></w:sectPr>`, twips(p.Width), twips(p.Height))
+// section closes a page: its header and footer references, its size, and
+// where page numbering starts (start >= 0).
+func section(p Page, refs string, start int) string {
+	numbering := ""
+	if start >= 0 {
+		numbering = fmt.Sprintf(`<w:pgNumType w:start="%d"/>`, start)
+	}
+	// A negative top or bottom margin places the body exactly there, however
+	// tall the header or footer content is.
+	edge := "0"
+	if refs != "" {
+		edge = "-1"
+	}
+	return fmt.Sprintf(`<w:sectPr>%s<w:type w:val="nextPage"/><w:pgSz w:w="%d" w:h="%d"/><w:pgMar w:top="%s" w:right="0" w:bottom="%s" w:left="0" w:header="0" w:footer="0" w:gutter="0"/>%s</w:sectPr>`, refs, twips(p.Width), twips(p.Height), edge, edge, numbering)
 }
 
 // Write is the deterministic low-level serializer, used by conversion and the
@@ -422,7 +440,8 @@ func write(ctx context.Context, dst io.Writer, pages []Page) (report Report, err
 	w := writer{files: map[string][]byte{}, fonts: map[string]Span{}}
 	w.body.WriteString(declaration + `<w:document xmlns:w="` + word + `" xmlns:r="` + relationships + `" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><w:body>`)
 	w.rels.WriteString(declaration + `<Relationships xmlns="` + packageRelationships + `">`)
-	for i, p := range pages {
+	margins, body, firstNumber := w.margins(pages)
+	for i, p := range body {
 		if err := ctx.Err(); err != nil {
 			return report, err
 		}
@@ -460,15 +479,20 @@ func write(ctx context.Context, dst io.Writer, pages []Page) (report Report, err
 			cx, cy := int64(math.Round(im.Width*12700)), int64(math.Round(im.Height*12700))
 			fmt.Fprintf(&w.body, `<w:p><w:r><w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="0" behindDoc="1" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="page"><wp:posOffset>%d</wp:posOffset></wp:positionH><wp:positionV relativeFrom="page"><wp:posOffset>%d</wp:posOffset></wp:positionV><wp:extent cx="%d" cy="%d"/><wp:wrapNone/><wp:docPr id="%d" name="Image %d"/><wp:cNvGraphicFramePr/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="%d" name="Image %d"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="%s"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="%d" cy="%d"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r></w:p>`, int64(math.Round(im.X*12700)), int64(math.Round(im.Y*12700)), cx, cy, shape, shape, shape, shape, id, cx, cy)
 		}
+		// Only the first section sets where page numbering starts.
+		start := -1
+		if i == 0 {
+			start = firstNumber
+		}
 		if i < len(pages)-1 {
-			w.body.WriteString(`<w:p><w:pPr><w:rPr><w:sz w:val="1"/></w:rPr>` + section(p) + `</w:pPr></w:p>`)
+			w.body.WriteString(`<w:p><w:pPr><w:rPr><w:sz w:val="1"/></w:rPr>` + section(p, margins[i], start) + `</w:pPr></w:p>`)
 		} else {
-			w.body.WriteString(section(p))
+			w.body.WriteString(section(p, margins[i], start))
 		}
 		report.Pages++
 		report.Tables += len(l.Tables)
 		report.Images += len(l.Images)
-		for _, s := range p.Spans {
+		for _, s := range pages[i].Spans { // header and footer text counts too
 			report.Characters += utf8.RuneCountInString(s.Text)
 		}
 		generated := w.body.Len()
@@ -488,22 +512,47 @@ func write(ctx context.Context, dst io.Writer, pages []Page) (report Report, err
 	w.files["word/document.xml"] = []byte(w.body.String())
 	w.files["word/_rels/document.xml.rels"] = []byte(w.rels.String())
 	w.files["_rels/.rels"] = []byte(declaration + `<Relationships xmlns="` + packageRelationships + `"><Relationship Id="rId1" Type="` + relationships + `/officeDocument" Target="word/document.xml"/></Relationships>`)
-	w.files["[Content_Types].xml"] = []byte(declaration + `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/><Override PartName="/word/fontTable.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml"/></Types>`)
-	archive := zip.NewWriter(dst)
 	var names []string
 	for name := range w.files {
 		names = append(names, name)
 	}
+	w.files["[Content_Types].xml"] = []byte(declaration + `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/><Override PartName="/word/fontTable.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml"/>` + marginTypes(names) + `</Types>`)
+	names = append(names, "[Content_Types].xml")
 	sort.Strings(names)
+	archive := zip.NewWriter(dst)
 	for _, name := range names {
-		f, e := archive.CreateHeader(&zip.FileHeader{Name: name, Method: zip.Deflate, Modified: time.Date(1980, 1, 1, 0, 0, 0, 0, time.UTC)})
+		data := w.files[name]
+		header := &zip.FileHeader{Name: name, Method: zip.Deflate, Modified: time.Date(1980, 1, 1, 0, 0, 0, 0, time.UTC)}
+		var f io.Writer
+		var e error
+		if strings.HasSuffix(name, ".png") {
+			// Already deflated: stored as is, with sizes up front so streaming
+			// readers (Java's ZipInputStream) can read it.
+			header.Method, header.CRC32 = zip.Store, crc32.ChecksumIEEE(data)
+			header.CompressedSize64, header.UncompressedSize64 = uint64(len(data)), uint64(len(data))
+			f, e = archive.CreateRaw(header)
+		} else {
+			f, e = archive.CreateHeader(header)
+		}
 		if e != nil {
 			return report, e
 		}
-		if _, e = f.Write(w.files[name]); e != nil {
+		if _, e = f.Write(data); e != nil {
 			return report, e
 		}
 	}
 	err = archive.Close()
 	return report, err
+}
+
+func marginTypes(names []string) string {
+	var b strings.Builder
+	for _, name := range slices.Sorted(slices.Values(names)) {
+		for _, kind := range []string{"header", "footer"} {
+			if strings.HasPrefix(name, "word/"+kind) {
+				fmt.Fprintf(&b, `<Override PartName="/%s" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.%s+xml"/>`, name, kind)
+			}
+		}
+	}
+	return b.String()
 }

@@ -152,7 +152,7 @@ func (b *cappedBuffer) Write(p []byte) (int, error) {
 // FindRecto locates the Recto decoder: $VERSO_RECTO_MODULE, the nearest
 // node_modules above this executable, then the global npm root. Never the
 // working directory: a converter run inside an upload must not load its code.
-// The module must be the Recto 0.7 line that reader.mjs is written against.
+// The module must be the Recto 0.8 line that reader.mjs is written against.
 func FindRecto() (string, error) {
 	rel := filepath.Join("node_modules", "@2018kguo", "recto", "dist", "index.js")
 	var candidates []string
@@ -178,11 +178,11 @@ func FindRecto() (string, error) {
 			continue
 		}
 		var pkg struct{ Name, Version string }
-		if json.Unmarshal(data, &pkg) == nil && pkg.Name == "@2018kguo/recto" && strings.HasPrefix(pkg.Version, "0.7.") {
+		if json.Unmarshal(data, &pkg) == nil && pkg.Name == "@2018kguo/recto" && strings.HasPrefix(pkg.Version, "0.8.") {
 			return m, nil
 		}
 	}
-	return "", errors.New("Recto 0.7 not found: npm install -g @2018kguo/recto@0.7, or pass its dist/index.js")
+	return "", errors.New("Recto 0.8 not found: npm install -g @2018kguo/recto@0.8, or pass its dist/index.js")
 }
 
 // Convert publishes only bytes that passed the validator. A same-filesystem

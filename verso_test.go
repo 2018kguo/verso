@@ -1110,6 +1110,10 @@ func TestStoredImagesHaveLocalSizes(t *testing.T) {
 		if strings.HasSuffix(f.Name, ".png") && (f.Method != zip.Store || f.Flags&0x8 != 0) {
 			t.Fatalf("%s: method %d flags %#x", f.Name, f.Method, f.Flags)
 		}
+		// Word reports "unreadable content" for an entry needing version 0.
+		if f.ReaderVersion < 20 || f.CreatorVersion&0xff < 20 {
+			t.Fatalf("%s: versions %d/%d, Word needs 2.0", f.Name, f.CreatorVersion, f.ReaderVersion)
+		}
 	}
 }
 

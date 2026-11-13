@@ -528,6 +528,9 @@ func write(ctx context.Context, dst io.Writer, pages []Page) (report Report, err
 		if strings.HasSuffix(name, ".png") {
 			// Already deflated: stored as is, with sizes up front so streaming
 			// readers (Java's ZipInputStream) can read it.
+			// CreateRaw writes the header as given: Word refuses an entry
+			// whose version needed to extract is 0, so state ZIP 2.0.
+			header.CreatorVersion, header.ReaderVersion = 20, 20
 			header.Method, header.CRC32 = zip.Store, crc32.ChecksumIEEE(data)
 			header.CompressedSize64, header.UncompressedSize64 = uint64(len(data)), uint64(len(data))
 			f, e = archive.CreateRaw(header)

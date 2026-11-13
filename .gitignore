@@ -1,0 +1,6 @@
+node_modules/
+validator/bin/
+validator/obj/
+/verso
+*.docx
+!testdata/*.docx

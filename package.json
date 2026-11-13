@@ -1,0 +1,7 @@
+{
+  "private": true,
+  "description": "Pins the Recto decoder that verso's tests and benchmarks run against.",
+  "devDependencies": {
+    "@2018kguo/recto": "0.7.1"
+  }
+}

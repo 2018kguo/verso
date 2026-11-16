@@ -97,7 +97,7 @@ Round trip of 22 Word documents (contracts, statements of work, reports):
 
 | Converter | Valid OOXML | Text recall | Ink F1 | ¶ recall | Pages | Median |
 |---|---|---|---|---|---|---|
-| **verso** | **20/20** (2 RTL refused) | **1.000** | **0.994** | **0.863** | 20/20 | **560 ms** |
+| **verso** | **20/20** (2 RTL refused) | **1.000** | **0.994** | **0.863** | 20/20 | **592 ms** |
 | pdf2docx 0.5.13 | 0/22 | 0.943 | 0.689 | 0.623 | 19/22 | 944 ms |
 | LibreOffice 26.2 (`soffice --convert-to docx`) | 0/22 | 0.924 | 0.350 | 0.331 | 22/22 | 2824 ms |
 
@@ -107,7 +107,7 @@ own render:
 
 | Converter | Valid OOXML | Text recall | Ink F1 | Pages | Median |
 |---|---|---|---|---|---|
-| **verso** | **21/21** | 0.996 | **0.983** | **21/21** | **1009 ms** |
+| **verso** | **21/21** | 0.996 | **0.984** | **21/21** | **419 ms** |
 | pdf2docx 0.5.13 | 0/20 (1 failed) | 0.997 | 0.610 | 16/21 | 2509 ms |
 | LibreOffice | 0/21 | 1.000 | 0.177 | 21/21 | 3900 ms |
 

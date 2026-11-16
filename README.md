@@ -4,7 +4,7 @@ Convert a PDF into a Word document you can edit, redline and send back, and
 that Microsoft's own validator accepts.
 
 ```sh
-npm install -g @2018kguo/recto@0.8.2  # PDF engine (WebAssembly, no native deps); Node 24+
+npm install -g @2018kguo/recto@0.9.0  # PDF engine (WebAssembly, no native deps); Node 24+
 go install github.com/2018kguo/verso/cmd/verso@latest
 verso report.pdf report.docx          # prints a JSON report; exits 1 if it refuses
 ```
@@ -16,20 +16,51 @@ planted there.
 
 ## Demo
 
-Three original documents (in `demo/`, fictional content) were exported to PDF
-by Microsoft Word. Each converter turned the PDF back into `.docx`, and Word
-rendered the result. Each image shows page 1 in that order: the source PDF,
-then verso, pdf2docx 0.5.13 and LibreOffice. Rebuild with `demo/run.sh`.
+Six public PDFs chosen to be hard:
+- a two-column physics paper set in TeX, with math;
+- a Japanese Wikipedia article with a periodic table;
+- a congressional bill with line numbers;
+- NIST's AES standard, with matrices, subscripts and figures made of ruled grids;
+- the IRS W-4;
+- a federal court form.
 
-| | verso | pdf2docx | LibreOffice |
+Each converter turned each PDF into `.docx`, and Microsoft Word rendered the
+result. Ink F1 covers every page of the document. A page count that differs
+from the source means text flowed onto the wrong pages.
+
+| | verso | pdf2docx 0.5.13 | LibreOffice 26.2 |
 |---|---|---|---|
-| Contract (justified clauses, leader-dot contents) | **valid**, Ink F1 0.996, 2/2 pages | invalid, 0.440, 3 pages | invalid, 0.204 |
-| Report (bullets, shaded table, header and footer) | **valid**, 1.000 | invalid, 0.474, 2 pages | invalid, 0.259 |
-| Invoice (merged cells, right-aligned amounts) | **valid**, 0.998 | invalid, 0.966 | invalid, 0.288 |
+| Physics paper, 17 pp | **valid**, Ink F1 **0.987** | invalid, 0.631, 18 pp | invalid, 0.686 |
+| Japanese Wikipedia, 14 pp | **valid**, **0.947** | invalid, 0.747, 15 pp | invalid, 0.490 |
+| H.R. 82 bill, 3 pp | **valid**, **0.968** | invalid, 0.957 | invalid, 0.518 |
+| NIST FIPS 197 (AES), 46 pp | **valid**, **0.974** | invalid, 0.363, 54 pp | invalid, 0.407 |
+| IRS Form W-4, 4 pp | **valid**, **0.965** | invalid, 0.956 | invalid, 0.703 |
+| U.S. Courts AO 240, 2 pp | **valid**, **0.982** | invalid, 0.963 | invalid, 0.239 |
 
-![Contract: source, verso, pdf2docx, LibreOffice](demo/contract.png)
-![Report](demo/report.png)
-![Invoice](demo/invoice.png)
+Each image shows one page: the source PDF, then verso, pdf2docx and LibreOffice.
+
+![Physics paper](demo/paper.png)
+![AES specification](demo/aes.png)
+![Japanese Wikipedia](demo/wikipedia-ja.png)
+![Bill](demo/bill.png)
+![IRS W-4](demo/w4.png)
+![Court form](demo/court-form.png)
+
+Known gaps, visible above:
+- The W-4's signature line overprints its label.
+- Text set in a font Word lacks is drawn in a substitute fitted to the
+  source width, so its letterforms differ from the source.
+
+`demo/run.sh` downloads the sources, checks their hashes and rebuilds the
+images and `demo/results.tsv`. The PDFs are not in this repository.
+
+The images reproduce pages of their sources, under the sources' terms:
+- the physics paper is Schade et al., arXiv:2611.18510, CC BY 4.0;
+- the Wikipedia page is from Japanese Wikipedia's 周期表 article, CC BY-SA 4.0;
+  `demo/wikipedia-ja.png` is shared under the same license;
+- the other four are U.S. government works in the public domain.
+
+`demo/sources.tsv` lists each URL.
 
 ## Why
 
@@ -67,7 +98,7 @@ Round trip of 22 Word documents (contracts, statements of work, reports):
 
 | Converter | Valid OOXML | Text recall | Ink F1 | ¶ recall | Pages | Median |
 |---|---|---|---|---|---|---|
-| **verso** | **20/20** (2 RTL refused) | **1.000** | **0.992** | **0.865** | 20/20 | **560 ms** |
+| **verso** | **20/20** (2 RTL refused) | **1.000** | **0.994** | **0.863** | 20/20 | **560 ms** |
 | pdf2docx 0.5.13 | 0/22 | 0.943 | 0.689 | 0.623 | 19/22 | 944 ms |
 | LibreOffice 26.2 (`soffice --convert-to docx`) | 0/22 | 0.924 | 0.350 | 0.331 | 22/22 | 2824 ms |
 
@@ -77,7 +108,7 @@ own render:
 
 | Converter | Valid OOXML | Text recall | Ink F1 | Pages | Median |
 |---|---|---|---|---|---|
-| **verso** | **21/21** | 0.996 | **0.982** | **21/21** | **1009 ms** |
+| **verso** | **21/21** | 0.996 | **0.983** | **21/21** | **1009 ms** |
 | pdf2docx 0.5.13 | 0/20 (1 failed) | 0.997 | 0.610 | 16/21 | 2509 ms |
 | LibreOffice | 0/21 | 1.000 | 0.177 | 21/21 | 3900 ms |
 

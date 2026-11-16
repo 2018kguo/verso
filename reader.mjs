@@ -107,6 +107,14 @@ function clusters(boxes, pad) {
 }
 
 // A page region cut to the page; null when nothing is left.
+// A dingbat font Word lacks draws its own pictures whatever its text says (a
+// court form's checkbox read as "’"): those glyphs keep their look as images.
+// Word's own Wingdings and Webdings draw as text.
+function pictographs(name = "") {
+  const family = name.replace(/^[A-Z]{6}\+/, "");
+  return /dingbat|iconic|wingding|webding/i.test(family) && !/^(wingdings( ?[23])?|webdings)(-|,|$)/i.test(family);
+}
+
 function clip(info, b) {
   const x = Math.max(0, b.x);
   const y = Math.max(0, b.y);
@@ -270,6 +278,7 @@ try {
       if (
         text.flags[i] & 2 ||
         text.codepoints[i] === 0xff_fd ||
+        pictographs(fonts[text.fontIds[i]]?.name) ||
         (tilted(text.angles[i]) && !level(text, i))
       ) {
         const [x, y, width, height] = text.boxes.subarray(4 * i, 4 * i + 4);

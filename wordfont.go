@@ -2,6 +2,7 @@ package verso
 
 import (
 	"math"
+	"regexp"
 	"strings"
 )
 
@@ -46,14 +47,23 @@ func wordFamily(s Span) string {
 	if a, ok := fontAliases[fontKey(family)]; ok && measurable(face(a, s), s.Text) {
 		return a
 	}
+	key := fontKey(family)
 	switch {
-	case s.Mono:
+	case s.Mono || monoName.MatchString(key):
 		return "Courier New"
-	case s.Serif:
+	case s.Serif || serifName.MatchString(key):
 		return "Times New Roman"
 	}
 	return "Arial"
 }
+
+// Embedded Type 1 fonts often leave the serif flag unset (TeX's Computer
+// Modern, URW's Nimbus Roman): their names say what the flags don't, and
+// set in Arial a serif document grew by pages.
+var (
+	monoName  = regexp.MustCompile(`mono|courier|typewriter|^(cm|lm|ec)tt`)
+	serifName = regexp.MustCompile(`roman|serif|times|mincho|ming|song|garamond|georgia|palatino|bookman|schoolbook|century|termes|stix|libertine|charter|^(cm|lm|ec)(r|mi|bx|ti|sl|csc|sy|ex|u|b)[0-9]`)
+)
 
 // wordFit is the character scale, in percent, and the tracking, in points,
 // that give a span its source width in the family Word lays it out in; ok is

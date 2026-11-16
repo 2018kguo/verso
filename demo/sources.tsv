@@ -1,0 +1,7 @@
+name	page	sha256	url	source and license
+paper	2	99882afbea1f6fc76472e667a3ba106cee105c72ff54e1bf07247909c61d4caf	https://arxiv.org/pdf/2611.18510v1	Schade et al., "Complex fluid flow dynamics by bright scattershot boson sampling", arXiv:2611.18510, CC BY 4.0
+wikipedia-ja	1	-	https://ja.wikipedia.org/api/rest_v1/page/pdf/%E5%91%A8%E6%9C%9F%E8%A1%A8	Japanese Wikipedia, "周期表" (periodic table), CC BY-SA 4.0; the article changes, so its hash is not pinned
+bill	1	0d2d66d26a3b99e268629b14b8c9d35fa81cf9f8c26f4e29d42b969f20ce6d05	https://www.govinfo.gov/content/pkg/BILLS-118hr82ih/pdf/BILLS-118hr82ih.pdf	U.S. House bill H.R. 82 (118th Congress), as introduced; U.S. government work, public domain
+aes	16	62c86eb567f13edb8f71826e985da870b04ef6381634f303cdb16e84d47becd1	https://nvlpubs.nist.gov/nistpubs/FIPS/NIST.FIPS.197-upd1.pdf	NIST FIPS 197 (AES), 2023 update; U.S. government work, public domain
+w4	1	94fa236f26c1a6dbbdeb40b8bd8870793e7a5be0f74ead3c2799d2b0961be68a	https://www.irs.gov/pub/irs-prior/fw4--2025.pdf	IRS Form W-4 (2025); U.S. government work, public domain
+court-form	1	7842bdfb86dd34f575ab12bc8636a94d82d10bcdc9f23c991e05dd7ec54e098e	https://www.uscourts.gov/sites/default/files/ao240.pdf	U.S. Courts form AO 240; U.S. government work, public domain

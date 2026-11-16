@@ -30,8 +30,9 @@ type Block struct {
 type Item struct {
 	Block   *Block
 	Table   *Table
-	Columns []Block // side by side: written as a borderless layout table
-	Frames  []Line  // last resort: positioned line frames
+	Columns []Block  // side by side: written as a borderless layout table
+	Tables  []*Table // ruled tables side by side: cells of one borderless row
+	Frames  []Line   // last resort: positioned line frames
 }
 
 func (it Item) top() float64 {
@@ -40,6 +41,12 @@ func (it Item) top() float64 {
 		return it.Block.Y
 	case it.Table != nil:
 		return it.Table.Y
+	case len(it.Tables) > 0:
+		y := it.Tables[0].Y
+		for _, t := range it.Tables {
+			y = math.Min(y, t.Y)
+		}
+		return y
 	case len(it.Columns) > 0:
 		y := it.Columns[0].Y
 		for _, c := range it.Columns {
@@ -255,6 +262,22 @@ func median(v []float64) float64 {
 // paragraphs splits a column's lines where the source broke deliberately.
 // The main test is typesetting's own: if the next line's first word would
 // have fit at the end of this line, the break was a paragraph end.
+// itemRight is the right edge of a list item's widest line: its lines so
+// far and the lines after them that start at its hanging indent.
+func itemRight(current, next []Line, hang float64) float64 {
+	r := 0.0
+	for _, l := range current {
+		r = math.Max(r, l.right())
+	}
+	for _, l := range next {
+		if math.Abs(l.X-hang) > 1.5 {
+			break
+		}
+		r = math.Max(r, l.right())
+	}
+	return r
+}
+
 func paragraphs(lines []Line, left, right float64) []Paragraph {
 	gaps := make([]float64, len(lines)) // gaps[i]: baseline gap above line i
 	for i := 1; i < len(lines); i++ {
@@ -318,10 +341,12 @@ func paragraphs(lines []Line, left, right float64) []Paragraph {
 			prev.leader() || l.leader() || // a contents entry is its own paragraph
 			justifiedColumn && len(current) >= 2 && right-prev.right() > tol && sentenceEnd.MatchString(prev.text()) && !slices.ContainsFunc(current[:len(current)-1], func(l Line) bool { return !atEdge(l) })
 		// A list item's next line starting where its text starts (after the
-		// bullet's tab) is the item continuing, whatever the right edge says:
-		// list styles often wrap short of the body's margin.
+		// bullet's tab) is the item continuing, whatever the column's right
+		// edge says: list styles often wrap short of the body's margin. The
+		// item's own widest line still counts: a form's "(c) Single" then
+		// "Married filing jointly" ended short of it, and became one line.
 		if hang, ok := current[0].hang(); ok && math.Abs(l.X-hang) <= 1.5 && !listMarker.MatchString(l.text()) && !l.marked() &&
-			!wider(i) && math.Abs(l.size()-prev.size()) <= 0.15*size {
+			!wider(i) && math.Abs(l.size()-prev.size()) <= 0.15*size && itemRight(current, lines[i:], hang)-prev.right() <= l.firstWord()+0.5 {
 			out[len(out)-1] = append(current, l)
 			continue
 		}
@@ -454,6 +479,18 @@ func bands(bs []*Block, tables []Table) []Item {
 	return items
 }
 
+// apart reports whether tables share no horizontal extent.
+func apart(items []Item) bool {
+	for i, a := range items {
+		for _, b := range items[i+1:] {
+			if a.Table.X < b.Table.right() && b.Table.X < a.Table.right() {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func band(group []bandPiece) []Item {
 	if len(group) == 1 {
 		if group[0].table != nil {
@@ -478,6 +515,16 @@ func band(group []bandPiece) []Item {
 			}
 		}
 		return append(items, Item{Frames: ls})
+	}
+	// Tables side by side in the flow stack one under the other, and a
+	// figure of grids grew the page by their heights: one row holds them.
+	if len(items) > 1 && apart(items) {
+		ts := make([]*Table, len(items))
+		for i, it := range items {
+			ts[i] = it.Table
+		}
+		sort.SliceStable(ts, func(i, j int) bool { return ts[i].X < ts[j].X })
+		items = []Item{{Tables: ts}}
 	}
 	if len(items) > 0 {
 		return frames() // text beside a ruled table keeps its source position

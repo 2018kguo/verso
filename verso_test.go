@@ -787,7 +787,7 @@ func TestFindRectoIgnoresWorkingDirectory(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(planted, "dist"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	os.WriteFile(filepath.Join(planted, "package.json"), []byte(`{"name":"@2018kguo/recto","version":"0.8.2"}`), 0o600)
+	os.WriteFile(filepath.Join(planted, "package.json"), []byte(`{"name":"@2018kguo/recto","version":"0.9.0"}`), 0o600)
 	os.WriteFile(filepath.Join(planted, "dist", "index.js"), []byte(`throw new Error("planted")`), 0o600)
 	t.Chdir(dir)
 	t.Setenv("VERSO_RECTO_MODULE", "")
@@ -1511,9 +1511,10 @@ func TestNearWidthsTrackToSourceWidth(t *testing.T) {
 	}
 }
 
-// reader.mjs needs Recto's per-glyph scales (0.8.1) and text-free renders (0.8.2).
+// The fits are measured against Recto 0.9's text spacing: any 0.9 release,
+// nothing older or newer.
 func TestRectoVersion(t *testing.T) {
-	for v, ok := range map[string]bool{"0.8.0": false, "0.8.1": false, "0.8.2": true, "0.8.12": true, "0.8.3-rc.1": true, "0.9.0": false, "0.7.1": false, "0.8.01": false} {
+	for v, ok := range map[string]bool{"0.8.2": false, "0.9.0": true, "0.9.12": true, "0.9.1-rc.1": true, "0.10.0": false, "1.9.0": false} {
 		if rectoVersion.MatchString(v) != ok {
 			t.Errorf("%s: accepted %v, want %v", v, !ok, ok)
 		}
@@ -1982,5 +1983,118 @@ func TestSymbolFontUnicodeBulletGetsATextFace(t *testing.T) {
 	}
 	if got := wordFamily(wing); got != "Wingdings" {
 		t.Fatalf("private-use Wingdings bullet: %q, want Wingdings", got)
+	}
+}
+
+// Type 1 fonts with no serif flag are classed by their names: TeX's Computer
+// Modern and URW's Nimbus Roman are serif, CMTT is a typewriter face.
+func TestFontNamesClassUnflaggedFaces(t *testing.T) {
+	for font, want := range map[string]string{"NimbusRomNo9L-Regu": "Times New Roman", "CMR10": "Times New Roman", "CMMI10": "Times New Roman", "CMTT12": "Courier New", "NimbusSanL-Bold": "Arial", "SourceSansPro-Regular": "Arial", "CMSS10": "Arial"} {
+		s := span("x", 72, 100, 5)
+		s.Font = font
+		if got := wordFamily(s); got != want {
+			t.Errorf("%s: %s, want %s", font, got, want)
+		}
+	}
+}
+
+// Math indexes set apart, "{b7 b6 … b0}" with each subscript its own run,
+// fold into the line as lowered text, not a line of their own drawn over it.
+func TestSubscriptIndexesFoldIntoTheirLine(t *testing.T) {
+	spans := []Span{span("{", 100, 163, 6)}
+	for i := 0; i < 8; i++ {
+		b, sub := span("b", 106+float64(i)*14, 163, 6), span(fmt.Sprint(7-i), 112+float64(i)*14, 164.8, 4)
+		sub.Size = 8
+		spans = append(spans, b, sub)
+	}
+	spans = append(spans, span("} is", 220, 163, 20))
+	ls := lines(spans)
+	if len(ls) != 1 {
+		t.Fatalf("%d lines, want the subscripts folded into one", len(ls))
+	}
+	for _, s := range ls[0].Spans {
+		if s.Size == 8 && s.Rise >= 0 {
+			t.Fatalf("subscript %q rise %.1f, want lowered", s.Text, s.Rise)
+		}
+	}
+}
+
+// Two ruled grids side by side (a figure's before and after) are cells of
+// one row: written one after the other they stacked, and the page grew by
+// the second grid's height.
+func TestSideBySideTablesShareARow(t *testing.T) {
+	grid := func(x float64) []Segment {
+		var g []Segment
+		for i := 0; i <= 2; i++ {
+			v := float64(i) * 20
+			g = append(g, Segment{X1: x + v, Y1: 100, X2: x + v, Y2: 140}, Segment{X1: x, Y1: 100 + v, X2: x + 40, Y2: 100 + v})
+		}
+		return g
+	}
+	p := Page{Width: 612, Height: 792, Segments: append(grid(100), grid(300)...)}
+	for _, x := range []float64{105, 125, 305, 325} {
+		p.Spans = append(p.Spans, span("a", x, 103, 5), span("b", x, 123, 5))
+	}
+	p.Spans = append(p.Spans, span("Figure 3. Before and after", 100, 170, 140))
+	l, err := layout(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(l.Items) == 0 || len(l.Items[0].Tables) != 2 {
+		t.Fatalf("items %+v: want the two grids as one side-by-side item", l.Items)
+	}
+	var b bytes.Buffer
+	if _, err := Write(&b, []Page{p}); err != nil {
+		t.Fatal(err)
+	}
+	doc := docParts(t, b.Bytes())["word/document.xml"]
+	if outer := strings.Index(doc, "<w:tbl>"); outer < 0 || strings.Count(doc, "<w:tbl>") != 3 || !strings.Contains(doc[outer+7:], "<w:tc><w:tcPr>") {
+		t.Fatalf("want one layout row holding two nested tables:\n%s", doc)
+	}
+}
+
+// A form's checkbox options under one "(c)" label: each line ends far short
+// of the widest option, so each is its own paragraph, not one list item.
+func TestOptionsUnderAListLabelStayApart(t *testing.T) {
+	spans := []Span{span("(c)", 96, 160, 12), span("Single or Married filing separately", 126, 160, 110),
+		span("Married filing jointly or Qualifying surviving spouse", 126, 172, 168),
+		span("Head of household (Check only if you are unmarried and pay more than half the costs of a home.)", 126, 184, 450)}
+	ps := paragraphs(lines(spans), 96, 576)
+	if len(ps) != 3 {
+		t.Fatalf("%d paragraphs, want each option apart", len(ps))
+	}
+	// A list item wrapping short of the margin still continues.
+	wrap := []Span{span("(c)", 96, 160, 12), span("Single or Married filing separately and some more words", 126, 160, 300),
+		span("that wrap here.", 126, 172, 70)}
+	if ps := paragraphs(lines(wrap), 96, 576); len(ps) != 1 {
+		t.Fatalf("%d paragraphs, want the wrapped item whole", len(ps))
+	}
+}
+
+// A dingbat font Word lacks draws its own picture whatever its text says (a
+// court form's checkbox decoded as "’"): the glyph is kept as an image, its
+// line's words stay text.
+func TestDingbatGlyphsKeepTheirLook(t *testing.T) {
+	opts := integrationOptions(t)
+	input := filepath.Join(t.TempDir(), "dingbat.pdf")
+	content := "BT /F2 12 Tf 80 640 Td (q) Tj ET\nBT /F1 12 Tf 100 640 Td (Yes) Tj ET\n"
+	writePDF(t, input, []string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Count 1 /Kids [3 0 R] >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R /F2 6 0 R >> >> /Contents 5 0 R >>",
+		"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+		fmt.Sprintf("<< /Length %d >>\nstream\n%sendstream", len(content), content),
+		"<< /Type /Font /Subtype /Type1 /BaseFont /ZapfDingbats >>",
+	})
+	pages, err := Extract(context.Background(), input, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var text string
+	for _, sp := range pages[0].Spans {
+		text += sp.Text
+	}
+	if text != "Yes" || len(pages[0].Images) == 0 {
+		t.Fatalf("text %q, %d images: want the dingbat as an image beside the text", text, len(pages[0].Images))
 	}
 }

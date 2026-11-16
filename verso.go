@@ -150,9 +150,9 @@ func (b *cappedBuffer) Write(p []byte) (int, error) {
 	return n, nil
 }
 
-// The Recto releases reader.mjs runs on: 0.8.2 or a later 0.8 release, for
-// per-glyph horizontal scales and renders of art without the page's text.
-var rectoVersion = regexp.MustCompile(`^0\.8\.([2-9]|[1-9][0-9]+)(?:[-+].*)?$`)
+// The Recto releases reader.mjs runs on: 0.9, whose text spacing the
+// converter's fits were measured against.
+var rectoVersion = regexp.MustCompile(`^0\.9\.[0-9]+(?:[-+].*)?$`)
 
 // FindRecto locates the Recto decoder: $VERSO_RECTO_MODULE, the nearest
 // node_modules above this executable, then the global npm root. Never the
@@ -186,7 +186,7 @@ func FindRecto() (string, error) {
 			return m, nil
 		}
 	}
-	return "", errors.New("Recto 0.8.2+ not found: npm install -g @2018kguo/recto@0.8, or pass its dist/index.js")
+	return "", errors.New("Recto 0.9 not found: npm install -g @2018kguo/recto@0.9, or pass its dist/index.js")
 }
 
 // Convert publishes only bytes that passed the validator. A same-filesystem

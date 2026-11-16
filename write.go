@@ -107,6 +107,8 @@ var fontAliases = map[string]string{
 	"nimbusroman": "Times New Roman", "nimbusromanno9l": "Times New Roman", "nimbusmono": "Courier New",
 	"freesans": "Arial", "freeserif": "Times New Roman", "freemono": "Courier New", "helveticaneue": "Arial",
 	"notosans": "Arial", "notoserif": "Times New Roman",
+	"nimbusromno9l": "Times New Roman", "nimbusmonl": "Courier New", "texgyretermes": "Times New Roman",
+	"texgyreheros": "Arial", "texgyrecursor": "Courier New",
 	// Bitstream Vera's design and widths (DejaVu extends it) are Verdana's
 	// within 1% (median per letter 1.000); Arial is 13% narrower.
 	"dejavusans": "Verdana", "bitstreamverasans": "Verdana",
@@ -451,9 +453,11 @@ func (w *writer) gridRows(b *strings.Builder, rows [][]Line, edges []float64, to
 	return top
 }
 
-func (w *writer) table(t Table) string {
+// table writes a ruled table; origin is the left edge its indent counts
+// from (the page, or the layout cell holding it).
+func (w *writer) table(t Table, origin float64) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, `<w:tbl><w:tblPr><w:tblW w:w="%d" w:type="dxa"/><w:jc w:val="left"/><w:tblInd w:w="%d" w:type="dxa"/><w:tblBorders>`, twips(t.XS[len(t.XS)-1]-t.X), twips(t.X))
+	fmt.Fprintf(&b, `<w:tbl><w:tblPr><w:tblW w:w="%d" w:type="dxa"/><w:jc w:val="left"/><w:tblInd w:w="%d" w:type="dxa"/><w:tblBorders>`, twips(t.right()-t.X), twips(t.X-origin))
 	for _, edge := range []string{"top", "left", "bottom", "right", "insideH", "insideV"} {
 		fmt.Fprintf(&b, `<w:%s w:val="single" w:sz="4" w:color="000000"/>`, edge)
 	}
@@ -505,6 +509,34 @@ func (w *writer) table(t Table) string {
 	}
 	b.WriteString(`</w:tbl>`)
 	return b.String()
+}
+
+// tables writes ruled tables that sit side by side as the cells of one
+// borderless row of their combined height, each nested at its source
+// position. Returns the row's bottom.
+func (w *writer) tables(b *strings.Builder, ts []*Table, top float64) float64 {
+	bottom, right := top, ts[len(ts)-1].right()
+	for _, t := range ts {
+		bottom = math.Max(bottom, t.YS[len(t.YS)-1])
+	}
+	fmt.Fprintf(b, `<w:tbl><w:tblPr><w:tblW w:w="%d" w:type="dxa"/><w:jc w:val="left"/><w:tblInd w:w="%d" w:type="dxa"/>%s</w:tblPr><w:tblGrid>`, twips(right-ts[0].X), twips(ts[0].X), tablePrefix)
+	edges := make([]float64, len(ts)+1)
+	for i, t := range ts {
+		edges[i] = t.X
+	}
+	edges[len(ts)] = right
+	for i := range ts {
+		fmt.Fprintf(b, `<w:gridCol w:w="%d"/>`, twips(edges[i+1]-edges[i]))
+	}
+	fmt.Fprintf(b, `</w:tblGrid><w:tr><w:trPr><w:cantSplit/><w:trHeight w:val="%d" w:hRule="exact"/></w:trPr>`, max(1, twips(bottom-top)))
+	for i, t := range ts {
+		fmt.Fprintf(b, `<w:tc><w:tcPr><w:tcW w:w="%d" w:type="dxa"/></w:tcPr>`, twips(edges[i+1]-edges[i]))
+		spacer(b, top, t.Y)
+		b.WriteString(w.table(*t, t.X))
+		b.WriteString(`<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="1" w:lineRule="exact"/></w:pPr></w:p></w:tc>`)
+	}
+	b.WriteString(`</w:tr></w:tbl>`)
+	return bottom
 }
 
 // columns writes side-by-side blocks as one borderless row, so each column
@@ -608,8 +640,11 @@ func write(ctx context.Context, dst io.Writer, pages []Page) (report Report, err
 				}
 			case it.Table != nil:
 				cursor = spacer(&w.body, cursor, it.Table.Y)
-				w.body.WriteString(w.table(*it.Table))
+				w.body.WriteString(w.table(*it.Table, 0))
 				cursor = it.Table.YS[len(it.Table.YS)-1]
+			case len(it.Tables) > 0:
+				cursor = spacer(&w.body, cursor, it.top())
+				cursor = w.tables(&w.body, it.Tables, cursor)
 			case len(it.Columns) > 0:
 				cursor = spacer(&w.body, cursor, it.top())
 				cursor = w.columns(&w.body, it.Columns, cursor)

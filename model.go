@@ -56,6 +56,9 @@ type Table struct {
 	XS, YS []float64
 	Rows   [][]Cell
 }
+
+func (t Table) right() float64 { return t.XS[len(t.XS)-1] }
+
 type Layout struct {
 	Items  []Item
 	Tables []Table
@@ -239,11 +242,14 @@ func scripts(ls []Line) []Line {
 		keep[i] = true
 	}
 	for i, l := range ls {
-		n := 0
+		// Math sets each index apart ("b₇ b₆ … b₀"): a line of many short
+		// scripts folds too.
+		n, short := 0, true
 		for _, s := range l.Spans {
-			n += utf8.RuneCountInString(s.Text)
+			c := utf8.RuneCountInString(strings.TrimSpace(s.Text))
+			n, short = n+c, short && c <= 3
 		}
-		if n > 12 || len(l.Spans) > 3 {
+		if (n > 12 || len(l.Spans) > 3) && (!short || n > 40) {
 			continue
 		}
 		size := l.size()

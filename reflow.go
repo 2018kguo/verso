@@ -101,18 +101,22 @@ func (l Line) firstWord() float64 {
 		if i > 0 && l.spaced(i) {
 			return l.Spans[i-1].X + l.Spans[i-1].Width - start + 0.25*s.Size
 		}
+		// Positions inside a span are its width shared by the ems before
+		// them (by character count where no table measures the face): by
+		// count, "sit" in a long span measured 16pt for its 13.
+		share := func(prefix string) float64 {
+			if all := emsIn(s, s.Text); all > 0 {
+				return s.Width * emsIn(s, prefix) / all
+			}
+			return 0
+		}
 		text := s.Text
 		if i == 0 {
-			trimmed := strings.TrimLeft(text, " ")
-			n := utf8.RuneCountInString(text)
-			if n > 0 {
-				start += s.Width * float64(n-utf8.RuneCountInString(trimmed)) / float64(n)
-			}
-			text = trimmed
+			text = strings.TrimLeft(text, " ")
+			start += share(s.Text[:len(s.Text)-len(text)])
 		}
 		if j := strings.IndexByte(text, ' '); j >= 0 {
-			n := utf8.RuneCountInString(s.Text)
-			end := s.X + s.Width*float64(utf8.RuneCountInString(s.Text)-utf8.RuneCountInString(text)+utf8.RuneCountInString(text[:j]))/float64(n)
+			end := s.X + share(s.Text[:len(s.Text)-len(text)+j])
 			return end - start + 0.25*s.Size
 		}
 	}

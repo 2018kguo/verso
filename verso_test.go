@@ -581,6 +581,9 @@ func TestHorizontalScaleIsCharacterScale(t *testing.T) {
 		})
 	}
 }
+
+// Text of naturally wide letters converts without a fidelity warning: no
+// horizontal-scale notice for glyphs that are simply wide.
 func TestWideLettersAreNotScaling(t *testing.T) {
 	opts := integrationOptions(t)
 	opts.AllowWarnings = false
@@ -1279,6 +1282,15 @@ func TestLeaderDotsBecomeATab(t *testing.T) {
 			t.Fatalf("leader not a dot-leader tab at the number: %s", doc)
 		}
 	}
+	// A line of only dots and a number (the title wrapped onto the line
+	// above) keeps its dots: a leader tab needs a title to lead from.
+	var only bytes.Buffer
+	if _, err := Write(&only, []Page{{Width: 612, Height: 792, Spans: []Span{span("..........", 400, 100, 120), span("iv", 530, 100, 8)}}}); err != nil {
+		t.Fatal(err)
+	}
+	if doc := docParts(t, only.Bytes())["word/document.xml"]; !strings.Contains(doc, "....") {
+		t.Fatalf("title-less leader lost its dots: %s", doc)
+	}
 	// A contents page's entries stay one paragraph each: joined, Word
 	// wrapped each entry's title onto the previous entry's line.
 	var spans []Span
@@ -1338,11 +1350,11 @@ func TestSpaceBetweenSpansKeepsTheGap(t *testing.T) {
 	}
 }
 
-// A face Word has but whose widths are unknown (Verdana) still writes its
+// A face Word has but whose widths are unknown (Garamond) still writes its
 // spaces and leaders: their widths fall back, they never index a table.
 func TestUnknownFaceMetricsFallBack(t *testing.T) {
 	a, b, n := span("Name", 72, 100, 30), span(".........", 110, 100, 300), span("12", 420, 100, 12)
-	a.Font, b.Font, n.Font = "Verdana", "Verdana", "Verdana"
+	a.Font, b.Font, n.Font = "Garamond", "Garamond", "Garamond"
 	var out bytes.Buffer
 	if _, err := Write(&out, []Page{{Width: 612, Height: 792, Spans: []Span{a, span("word", 107, 100, 1), b, n}}}); err != nil {
 		t.Fatal(err)
@@ -1424,12 +1436,12 @@ func TestDrawnTabReachesItsStop(t *testing.T) {
 func TestSubstituteFontsKeepSourceWidths(t *testing.T) {
 	text := "Proclamation of the Loan"
 	for _, c := range []struct {
-		font  string
-		width float64 // source width as a share of Arial Bold's
-	}{{"DejaVuSans-Bold", 1.12}, {"ABCDEF+Frutiger-Bold", 0.95}, {"Arial-BoldMT", 1.005}} {
+		font, face string
+		width      float64 // source width as a share of Arial Bold's
+	}{{"DejaVuSans-Bold", "Verdana|b", 1.12}, {"ABCDEF+Frutiger-Bold", "Arial|b", 0.95}, {"Arial-BoldMT", "Arial|b", 1.005}} {
 		s := span(text, 72, 100, c.width*emsOf(text, "Arial|b")*11)
 		s.Font, s.Weight = c.font, 700
-		if word := wordWidth(t, s, "Arial|b"); math.Abs(word-s.Width) > 0.005*s.Width {
+		if word := wordWidth(t, s, c.face); math.Abs(word-s.Width) > 0.005*s.Width {
 			t.Fatalf("%s: Word width %.2f, source %.2f", c.font, word, s.Width)
 		}
 	}
@@ -1491,11 +1503,11 @@ func TestNearWidthsTrackToSourceWidth(t *testing.T) {
 	if word := wordWidth(t, s, "Times New Roman"); math.Abs(word-s.Width) > 0.005*s.Width {
 		t.Fatalf("Word width %.2f, source %.2f", word, s.Width)
 	}
-	// Wider with spaces is a justified line's stretched spaces: Word's
-	// justification redraws those, and tracking them too overfills the line.
+	// Wider with spaces on a ragged line is the line's width: kept, Word
+	// breaks where the source did.
 	s.Width = emsOf(text, "Times New Roman")*12 + 2
-	if word := wordWidth(t, s, "Times New Roman"); math.Abs(word-emsOf(text, "Times New Roman")*12) > 0.01 {
-		t.Fatalf("justified stretch tracked: Word width %.2f", word)
+	if word := wordWidth(t, s, "Times New Roman"); math.Abs(word-s.Width) > 0.005*s.Width {
+		t.Fatalf("ragged line Word width %.2f, source %.2f", word, s.Width)
 	}
 }
 
@@ -1749,7 +1761,7 @@ func TestJustifiedLinesTrackNoRoundingLoss(t *testing.T) {
 	_, ragged, ok := wordFit(s, "Times New Roman", false)
 	_, justified, _ := wordFit(s, "Times New Roman", true)
 	if !ok || ragged <= 0 || justified != 0 {
-		t.Fatalf("tracking ragged %.3f, justified %.3f: want the loss only on the ragged line", ragged, justified)
+		t.Fatalf("tracking ragged %.3f, justified %.3f: want the extra width only on the ragged line", ragged, justified)
 	}
 }
 
@@ -1772,5 +1784,189 @@ func TestJustifiedLinesRoundTrackingDown(t *testing.T) {
 	// The last line, which justification leaves as set, keeps its width.
 	if !strings.Contains(doc, `<w:jc w:val="both"/>`) || strings.Count(doc, `<w:spacing w:val="-1"/>`) != 2 {
 		t.Fatalf("want the two stretched lines set a twip narrower: %s", doc)
+	}
+}
+
+// DejaVu Sans lays out as Verdana, its twin in widths; a span with a glyph
+// Verdana lacks (a "▇" redaction) keeps Arial, narrower: at Verdana's width
+// Word's wider fallback glyph wrapped the line.
+func TestDejaVuSansIsVerdana(t *testing.T) {
+	for text, want := range map[string]string{"Proclamation of the Loan": "Verdana", "PINJAMAN \u2587\u2587\u2587 SURA": "Arial"} {
+		s := span(text, 72, 100, 120)
+		s.Font = "DejaVuSans-Bold"
+		if got := wordFamily(s); got != want {
+			t.Errorf("%q: %s, want %s", text, got, want)
+		}
+	}
+}
+
+// Columns sharing one baseline per line are a table without rules: one
+// exact-height row per baseline, so rows line up across columns (flowed as
+// separate columns, they drifted a few points apart).
+func TestUnruledGridIsOneRowPerBaseline(t *testing.T) {
+	var spans []Span
+	for r, row := range [][]string{{"MONTH", "ASSAY %", "pH", "APPEARANCE"}, {"0", "99.4", "6.1", "White susp."}, {"1", "98.1", "6.0", "White susp."}, {"3", "96.0", "6.0", "White susp."}, {"6", "92.7", "5.9", "Sl. yellow"}} {
+		for c, text := range row {
+			s := span(text, []float64{49, 148, 286, 345}[c], 137+18.7*float64(r), 6*float64(len(text)))
+			s.Font, s.Size, s.Mono = "LiberationMono", 10, true
+			spans = append(spans, s)
+		}
+	}
+	spans = append(spans, span("Accelerated assay fell below 95.0% at month 6.", 49, 300, 280))
+	var out bytes.Buffer
+	if _, err := Write(&out, []Page{{Width: 612, Height: 792, Spans: spans}}); err != nil {
+		t.Fatal(err)
+	}
+	doc := docParts(t, out.Bytes())["word/document.xml"]
+	if n := strings.Count(doc, `w:hRule="exact"/></w:trPr><w:tc>`); n != 5 {
+		t.Fatalf("%d exact-height rows, want 5: %s", n, doc)
+	}
+}
+
+// A clause number drawn with its space ("4.15 ") leaves a gap after the
+// space narrower than a marker's: measured from its ink it is a tab.
+func TestMarkerGapCountsFromItsInk(t *testing.T) {
+	num := span("4.15 ", 72, 100, 22.27)
+	num.Ink, num.Size = 19.5, 11.04
+	text := span("Sagittis vitae et leo duis ut diam.", 100.82, 100, 180)
+	text.Size = 11.04
+	if !tabbed(Line{Spans: []Span{num, text}}, 1) {
+		t.Fatal("clause number's gap read as a space")
+	}
+}
+
+// A font Word has but no width table covers keeps its source width at a
+// size between half points: 9.12pt is drawn at 9pt, and the 1.3% it loses
+// comes back as tracking.
+func TestUnmeasuredOfficeFontKeepsWidthAtHalfPoints(t *testing.T) {
+	s := span("Organize any necessary meetings to take place on your trip", 131, 100, 386.59)
+	s.Font, s.Size = "FranklinGothic-Medium", 9.12
+	var out bytes.Buffer
+	if _, err := Write(&out, []Page{{Width: 612, Height: 792, Spans: []Span{s}}}); err != nil {
+		t.Fatal(err)
+	}
+	doc := docParts(t, out.Bytes())["word/document.xml"]
+	// 386.59 * (1 - 9/9.12) / 58 characters = 0.088pt = 2 twips.
+	if !strings.Contains(doc, `<w:spacing w:val="2"/>`) {
+		t.Fatalf("half-point loss not tracked back: %s", doc)
+	}
+}
+
+// A line's first word inside a long span is measured by its letters' widths:
+// by character count "sit" in a span of wider letters measured 16pt for its
+// 13, the ragged slack let Word take it onto the line above.
+func TestFirstWordMeasuredByItsLetters(t *testing.T) {
+	text := "sit amet nulla facilisi. In mollis nunc sed id. Tincidunt arcu"
+	s := span(text, 100, 100, emsOf(text, "Times New Roman")*11)
+	s.Font, s.Size = "TimesNewRomanPSMT", 11
+	want := emsOf("sit", "Times New Roman")*11 + 0.25*11
+	if got := (Line{Spans: []Span{s}}).firstWord(); math.Abs(got-want) > 0.05 {
+		t.Fatalf("first word %.2f, want %.2f", got, want)
+	}
+}
+
+// A link the PDF draws without an underline stays plain; one it underlines
+// keeps the underline.
+func TestLinksKeepTheirDrawnLook(t *testing.T) {
+	for _, underlined := range []bool{false, true} {
+		s := span("An agency may not conduct or sponsor a collection", 72, 100, 240)
+		s.Link = "https://www.fda.gov"
+		p := Page{Width: 612, Height: 792, Spans: []Span{s}}
+		if underlined {
+			p.Segments = []Segment{{72, 111.5, 312, 111.5}}
+		}
+		var out bytes.Buffer
+		if _, err := Write(&out, []Page{p}); err != nil {
+			t.Fatal(err)
+		}
+		doc := docParts(t, out.Bytes())["word/document.xml"]
+		if strings.Contains(doc, `<w:u w:val="single"/>`) != underlined || !strings.Contains(doc, "<w:hyperlink") {
+			t.Fatalf("underlined %v: %s", underlined, doc)
+		}
+	}
+}
+
+// A paragraph wrapped inside a ruled cell narrower than the cell stays one
+// paragraph: measured from the cell's edge, every line had room for the
+// next line's first word and was split off.
+func TestCellParagraphWrapsAtItsText(t *testing.T) {
+	var spans []Span
+	for i, text := range []string{"any financial arrangement entered into between the sponsor", "of the covered study and the clinical investigator involved", "in the conduct of the covered study, whereby the value"} {
+		spans = append(spans, span(text, 80, 115+14*float64(i), 350))
+	}
+	spans[2].Width = 290
+	var segs []Segment
+	for _, y := range []float64{90, 110, 200} {
+		segs = append(segs, Segment{72, y, 560, y})
+	}
+	for _, x := range []float64{72, 500, 560} {
+		segs = append(segs, Segment{x, 90, x, 200})
+	}
+	var out bytes.Buffer
+	if _, err := Write(&out, []Page{{Width: 612, Height: 792, Spans: spans, Segments: segs}}); err != nil {
+		t.Fatal(err)
+	}
+	doc := docParts(t, out.Bytes())["word/document.xml"]
+	cell := doc[strings.Index(doc, "any financial"):]
+	if end := strings.Index(cell, "the value"); strings.Contains(cell[:end], "<w:p>") {
+		t.Fatalf("cell paragraph split: %s", doc)
+	}
+}
+
+// Short centered lines in a ruled cell stay a paragraph each: joined, Word
+// rewrapped "1 person = 1 generation" and "3 person = 2 generations" into
+// "1 person = 1 generation 3 / person = ...".
+func TestCellShortLinesStayApart(t *testing.T) {
+	var spans []Span
+	for i, text := range []string{"1 person = 1 generation", "3 person = 2 generations", "9 person = 3 generations"} {
+		spans = append(spans, span(text, 380, 115+16*float64(i), 110))
+	}
+	var segs []Segment
+	for _, y := range []float64{90, 110, 200} {
+		segs = append(segs, Segment{72, y, 560, y})
+	}
+	for _, x := range []float64{72, 330, 560} {
+		segs = append(segs, Segment{x, 90, x, 200})
+	}
+	var out bytes.Buffer
+	if _, err := Write(&out, []Page{{Width: 612, Height: 792, Spans: spans, Segments: segs}}); err != nil {
+		t.Fatal(err)
+	}
+	doc := docParts(t, out.Bytes())["word/document.xml"]
+	if cell := doc[strings.Index(doc, "1 person"):strings.Index(doc, "9 person")]; strings.Count(cell, "<w:p>") != 2 {
+		t.Fatalf("short cell lines joined: %s", cell)
+	}
+}
+
+// A gap drawn between word spans in a face no table measures (Georgia) keeps
+// Word's own space: measured against a guessed 0.5em it was tracked to nothing
+// and the words touched.
+func TestUnmeasuredFaceGapKeepsWordsApart(t *testing.T) {
+	hello, world := span("Hello", 72, 100, 26), span("world", 100.75, 100, 28)
+	hello.Font, world.Font = "Georgia", "Georgia"
+	var out bytes.Buffer
+	if _, err := Write(&out, []Page{{Width: 612, Height: 792, Spans: []Span{hello, world}}}); err != nil {
+		t.Fatal(err)
+	}
+	if m := regexp.MustCompile(`<w:spacing w:val="-\d+"/>`).FindString(docParts(t, out.Bytes())["word/document.xml"]); m != "" {
+		t.Fatalf("Georgia gap tracked narrower: %s", m)
+	}
+}
+
+// A horizontal scale far past Word's 600% (a Tz of 1e19 is a valid PDF real)
+// is clamped, not sent as a number the decoder's int cannot hold.
+func TestHugeHorizontalScaleConverts(t *testing.T) {
+	opts := integrationOptions(t)
+	input := filepath.Join(t.TempDir(), "tz.pdf")
+	content := "BT /F1 12 Tf 10000000000000000000 Tz 80 600 Td (W) Tj ET\nBT /F1 12 Tf 80 640 Td (Body text) Tj ET\n"
+	writePDF(t, input, []string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Count 1 /Kids [3 0 R] >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+		"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+		fmt.Sprintf("<< /Length %d >>\nstream\n%sendstream", len(content), content),
+	})
+	if _, err := Extract(context.Background(), input, opts); err != nil {
+		t.Fatal(err)
 	}
 }

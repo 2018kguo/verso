@@ -28,6 +28,7 @@ type Span struct {
 	Underline               bool    `json:"-"` // set from a rule under the span
 	PageNumber              bool    `json:"-"` // written as Word's PAGE field
 	Leader                  bool    `json:"-"` // after drawn leader dots: a right tab with a dot leader
+	Ink                     float64 // width to the last glyph that isn't a space; 0 when unknown
 }
 type Segment struct{ X1, Y1, X2, Y2 float64 }
 type Image struct {
@@ -65,6 +66,16 @@ type Layout struct {
 var colorPattern = regexp.MustCompile(`^[0-9A-Fa-f]{6}$`)
 var anchorPattern = regexp.MustCompile(`^#page[1-9][0-9]*$`)
 
+// wordLink reports whether Word can carry a link: none, a page anchor, or a
+// web or mail address.
+func wordLink(link string) bool {
+	if link == "" || anchorPattern.MatchString(link) {
+		return true
+	}
+	u, err := url.Parse(link)
+	return err == nil && (u.Scheme == "https" || u.Scheme == "http" || u.Scheme == "mailto")
+}
+
 func xmlText(s string) bool {
 	if !utf8.ValidString(s) {
 		return false
@@ -98,11 +109,8 @@ func (p Page) validate() error {
 		case !colorPattern.MatchString(s.Color):
 			return fmt.Errorf("color is not RRGGBB: %q", s.Color)
 		}
-		if s.Link != "" && !anchorPattern.MatchString(s.Link) {
-			u, err := url.Parse(s.Link)
-			if err != nil || (u.Scheme != "https" && u.Scheme != "http" && u.Scheme != "mailto") {
-				return fmt.Errorf("unsupported hyperlink")
-			}
+		if !wordLink(s.Link) {
+			return fmt.Errorf("unsupported hyperlink")
 		}
 		if !finite(s.X) || !finite(s.Y) || !finite(s.Width) || !finite(s.Height) || !finite(s.Baseline) || !finite(s.Size) || s.Size < 0.5 || s.Size > 400 || s.Width < 0 || s.Height < 0 || s.X < -2 || s.Y < -2 || s.X+s.Width > p.Width+2 || s.Y+s.Height > p.Height+2 {
 			return fmt.Errorf("invalid or out-of-page text geometry: %q at %.1f,%.1f %.1fx%.1f size %.2f on %.0fx%.0f", s.Text, s.X, s.Y, s.Width, s.Height, s.Size, p.Width, p.Height)
@@ -144,7 +152,7 @@ func (p *Page) sanitize() []string {
 			p.Width, p.Height = math.Min(p.Width*k, maxPage), math.Min(p.Height*k, maxPage)
 			for i := range p.Spans {
 				s := &p.Spans[i]
-				s.X, s.Y, s.Width, s.Height, s.Baseline, s.Size, s.Tracking = s.X*k, s.Y*k, s.Width*k, s.Height*k, s.Baseline*k, math.Max(0.5, s.Size*k), s.Tracking*k
+				s.X, s.Y, s.Width, s.Height, s.Baseline, s.Size, s.Tracking, s.Ink = s.X*k, s.Y*k, s.Width*k, s.Height*k, s.Baseline*k, math.Max(0.5, s.Size*k), s.Tracking*k, s.Ink*k
 			}
 			for i := range p.Segments {
 				g := &p.Segments[i]
@@ -162,11 +170,9 @@ func (p *Page) sanitize() []string {
 	for _, s := range p.Spans {
 		// A link Word cannot carry (a malformed escape, another scheme)
 		// keeps its text without the link.
-		if s.Link != "" && !anchorPattern.MatchString(s.Link) {
-			if u, err := url.Parse(s.Link); err != nil || (u.Scheme != "https" && u.Scheme != "http" && u.Scheme != "mailto") {
-				s.Link = ""
-				links++
-			}
+		if !wordLink(s.Link) {
+			s.Link = ""
+			links++
 		}
 		if finite(s.X, s.Y, s.Width, s.Height, s.Size) && s.Size >= 0.5 && s.Size <= 400 && s.X+s.Width > 0 && s.Y+s.Height > 0 && s.X < p.Width && s.Y < p.Height {
 			s.X, s.Y = math.Max(s.X, 0), math.Max(s.Y, 0)
@@ -526,8 +532,11 @@ func leaders(spans []Span) []Span {
 	if head := strings.TrimRight(dots.Text[:loc[0]], " "); head != "" {
 		// The title keeps its share of the span's width, by Word's metrics.
 		full, kept := emsIn(dots, dots.Text), emsIn(dots, head)
-		dots.Text, dots.Width = head, dots.Width*kept/max(full, 1e-9)
+		dots.Text, dots.Width, dots.Ink = head, dots.Width*kept/max(full, 1e-9), 0
 		out = append(out, dots)
+	}
+	if len(out) == 0 {
+		return spans // no title before the dots (it wrapped above): keep them drawn
 	}
 	number := spans[n-1]
 	number.Leader = true

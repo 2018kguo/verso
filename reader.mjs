@@ -377,7 +377,8 @@ try {
         link,
         // Tz as Word's character scale, in percent (a mirroring negative Tz
         // keeps its width).
-        scale: Math.round(Math.abs(text.hScales[i]) * 100),
+        // Word's range (1-600%); a huge Tz would not fit the Go int.
+        scale: Math.min(600, Math.round(Math.abs(text.hScales[i]) * 100) || 0),
       };
       glyphs.push(last);
     }
@@ -436,11 +437,22 @@ try {
         }
         last.text += g.text;
         last.width = Math.max(last.width, g.x + g.width - last.x);
+        if (g.text.trim()) {
+          last.ink = g.x + g.width - last.x;
+        }
         last.advance += g.width;
         last.count++;
       } else {
         const tab = tabbed !== undefined && Math.abs(tabbed - g.baseline) < 0.5;
-        last = { ...g, advance: g.width, count: 1, tab };
+        // ink: the width to the last glyph that isn't a space, whose
+        // advance a justified line stretches.
+        last = {
+          ...g,
+          advance: g.width,
+          count: 1,
+          tab,
+          ink: g.text.trim() ? g.width : 0,
+        };
         spans.push(last);
       }
       tabbed = undefined;

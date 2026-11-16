@@ -107,6 +107,9 @@ var fontAliases = map[string]string{
 	"nimbusroman": "Times New Roman", "nimbusromanno9l": "Times New Roman", "nimbusmono": "Courier New",
 	"freesans": "Arial", "freeserif": "Times New Roman", "freemono": "Courier New", "helveticaneue": "Arial",
 	"notosans": "Arial", "notoserif": "Times New Roman",
+	// Bitstream Vera's design and widths (DejaVu extends it) are Verdana's
+	// within 1% (median per letter 1.000); Arial is 13% narrower.
+	"dejavusans": "Verdana", "bitstreamverasans": "Verdana",
 }
 
 func fontKey(s string) string {
@@ -149,6 +152,11 @@ func (w *writer) span(b *strings.Builder, s Span) {
 	scale, tracking := s.Scale, s.Tracking
 	if fit, t, ok := wordFit(s, family, w.justified); ok {
 		scale, tracking = fit, t // the source width in Word's metrics, Tz included
+	} else if n := utf8.RuneCountInString(s.Text); n > 0 && family == fontName(s.Font) && !w.justified {
+		// A font Word has but no table measures: its source width is Word's
+		// at the source size, so track back what half points take off
+		// (9.12pt drawn at 9pt ran lines 1.3% short).
+		tracking += s.Width * (1 - float64(halfPoints(s.Size))/2/s.Size) / float64(n)
 	}
 	if _, ok := w.fonts[family]; !ok {
 		w.fonts[family] = s
@@ -189,7 +197,9 @@ func (w *writer) span(b *strings.Builder, s Span) {
 		fmt.Fprintf(b, `<w:position w:val="%d"/>`, rise)
 	}
 	fmt.Fprintf(b, `<w:sz w:val="%d"/><w:szCs w:val="%d"/>`, halfPoints(s.Size), halfPoints(s.Size))
-	if s.Link != "" || s.Underline {
+	// A link keeps the look the PDF drew: a link drawn plain (a whole
+	// paragraph made one link area) underlined was a rule under every line.
+	if s.Underline {
 		b.WriteString(`<w:u w:val="single"/>`)
 	}
 	// A soft hyphen is Word's optional hyphen: shown only where a line breaks.
@@ -224,7 +234,13 @@ func tabbed(l Line, i int) bool {
 	// After a line's first word a gap wider than a space and than the line's
 	// other word gaps is a tab: "3⇥Heading", "1⇥Entry ....... 4". Justification
 	// stretches every gap alike, so one as wide as the rest is a space.
-	return s.Tab || s.Leader || g > math.Max(18, s.Size*2) || i == 1 && (g > 0.6*s.Size && isMarker(prev.Text) || g > 0.9*s.Size && widest(l, g))
+	// A marker's gap counts from its ink: "4.15 " drawn with its space left
+	// only 6.5pt after it.
+	ink := g
+	if prev.Ink > 0 && prev.Ink < prev.Width {
+		ink = s.X - (prev.X + prev.Ink)
+	}
+	return s.Tab || s.Leader || g > math.Max(18, s.Size*2) || i == 1 && (ink > 0.6*s.Size && isMarker(prev.Text) || g > 0.9*s.Size && widest(l, g))
 }
 
 // widest reports whether gap g after a line's first span is clearly wider
@@ -251,7 +267,10 @@ func (w *writer) runs(b *strings.Builder, l Line) {
 				// stretch word gaps, and Word's own space would rewrap the line.
 				space := previous
 				space.Text, space.Width = " ", 0
-				space.Tracking = gap(previous, s) - spaceWidth(previous)
+				space.Tracking = 0 // a face no table measures keeps Word's own space
+				if measurable(face(wordFamily(previous), previous), " ") {
+					space.Tracking = gap(previous, s) - spaceWidth(previous)
+				}
 				if space.Link != s.Link {
 					space.Link = ""
 				}
@@ -370,6 +389,68 @@ func spacer(b *strings.Builder, cursor, y float64) float64 {
 
 const tablePrefix = `<w:tblLayout w:type="fixed"/><w:tblCellMar><w:top w:w="0" w:type="dxa"/><w:left w:w="0" w:type="dxa"/><w:bottom w:w="0" w:type="dxa"/><w:right w:w="0" w:type="dxa"/></w:tblCellMar>`
 
+// grid is the rows of side-by-side columns that share one baseline per
+// line (a table without rules: "MONTH  ASSAY %  pH"), one line per column
+// each; nil otherwise. Three columns at least: two of prose can share a
+// leading.
+func grid(cols []Block) [][]Line {
+	if len(cols) < 3 {
+		return nil
+	}
+	var rows [][]Line
+	for i, c := range cols {
+		var ls []Line
+		for _, p := range c.Paragraphs {
+			ls = append(ls, p.Lines...)
+		}
+		if i == 0 {
+			if len(ls) < 2 {
+				return nil
+			}
+			rows = make([][]Line, len(ls))
+		}
+		if len(ls) != len(rows) {
+			return nil
+		}
+		for r, l := range ls {
+			if i > 0 && math.Abs(l.Baseline-rows[r][0].Baseline) > 1 {
+				return nil
+			}
+			rows[r] = append(rows[r], l)
+		}
+	}
+	return rows
+}
+
+// gridRows writes grid rows as table rows of exact height, each cell one
+// line: columns flowed apart drifted a few points from row to row.
+func (w *writer) gridRows(b *strings.Builder, rows [][]Line, edges []float64, top float64) float64 {
+	pitch := func(r int) float64 {
+		if r+1 < len(rows) {
+			return rows[r+1][0].Baseline - rows[r][0].Baseline
+		}
+		return rows[r][0].Baseline - rows[r-1][0].Baseline
+	}
+	for r, row := range rows {
+		bottom := top
+		if r+1 < len(rows) {
+			bottom = rows[r+1][0].Baseline - baselineDepth(pitch(r+1))
+		}
+		var cells strings.Builder
+		for i, l := range row {
+			fmt.Fprintf(&cells, `<w:tc><w:tcPr><w:tcW w:w="%d" w:type="dxa"/></w:tcPr>`, twips(edges[i+1]-edges[i]))
+			for _, p := range paragraphs([]Line{l}, edges[i], edges[i+1]) {
+				p.Pitch = pitch(r)
+				bottom = math.Max(bottom, w.flow(&cells, p, edges[i], edges[i+1], top))
+			}
+			cells.WriteString(`</w:tc>`)
+		}
+		fmt.Fprintf(b, `<w:tr><w:trPr><w:cantSplit/><w:trHeight w:val="%d" w:hRule="exact"/></w:trPr>%s</w:tr>`, max(1, twips(bottom-top)), cells.String())
+		top = bottom
+	}
+	return top
+}
+
 func (w *writer) table(t Table) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, `<w:tbl><w:tblPr><w:tblW w:w="%d" w:type="dxa"/><w:jc w:val="left"/><w:tblInd w:w="%d" w:type="dxa"/><w:tblBorders>`, twips(t.XS[len(t.XS)-1]-t.X), twips(t.X))
@@ -402,7 +483,19 @@ func (w *writer) table(t Table) string {
 			}
 			cursor := t.YS[r]
 			if len(ll) > 0 {
-				for _, p := range paragraphs(ll, x, right) {
+				// Text that wraps in the cell (its widest line near the cell's
+				// width) is measured to its own right edge, as a block's: from
+				// the cell's edge every line had room for the next line's first
+				// word and became a paragraph. Short lines (centered labels)
+				// keep the cell's edge and stay a paragraph each.
+				edge, lo := 0.0, right
+				for _, l := range ll {
+					edge, lo = math.Max(edge, l.right()), math.Min(lo, l.X)
+				}
+				if edge-lo < 0.75*(right-x) {
+					edge = right
+				}
+				for _, p := range paragraphs(ll, x, math.Min(right, edge)) {
 					cursor = w.flow(&b, p, x, right, cursor)
 				}
 			}
@@ -431,6 +524,11 @@ func (w *writer) columns(b *strings.Builder, cols []Block, top float64) float64 
 		fmt.Fprintf(b, `<w:gridCol w:w="%d"/>`, twips(edges[i+1]-edges[i]))
 	}
 	b.WriteString(`</w:tblGrid>`)
+	if rows := grid(cols); rows != nil {
+		bottom := w.gridRows(b, rows, edges, top)
+		b.WriteString(`</w:tbl>`)
+		return bottom
+	}
 	var cells strings.Builder
 	bottom := top
 	for i, c := range cols {

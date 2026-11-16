@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-//go:generate go run gen_metrics.go /Applications/LibreOffice.app/Contents/Resources/fonts/truetype
+//go:generate go run gen_metrics.go /Applications/LibreOffice.app/Contents/Resources/fonts/truetype "/Applications/Microsoft Word.app/Contents/Resources/DFonts"
 
 // officeFonts are families Word ships or Office installs: Word lays them out
 // itself. Others are not on the reader's machine, so Word would substitute a
@@ -32,7 +32,10 @@ func wordFamily(s Span) string {
 	if officeFonts[fontKey(family)] {
 		return family
 	}
-	if a, ok := fontAliases[fontKey(family)]; ok {
+	// An alias as wide as the source leaves no room for a glyph it lacks
+	// (Word draws "▇" from a wider fallback, and lines wrapped): such a span
+	// keeps the class substitute, narrower in the span's class.
+	if a, ok := fontAliases[fontKey(family)]; ok && measurable(face(a, s), s.Text) {
 		return a
 	}
 	switch {
@@ -56,8 +59,15 @@ func wordFit(s Span, family string, justified bool) (scale int, tracking float64
 	if !known || s.Width <= 0 || s.Size <= 0 {
 		return 0, 0, false
 	}
+	// A justified line stretches a word's trailing space: measured with it,
+	// the stretch became glyph scale Word cannot shrink back, and full lines
+	// overflowed. Fit the glyphs to their ink; Word restretches the space.
+	text, width := s.Text, s.Width
+	if t := strings.TrimRight(text, " "); justified && t != "" && t != text && s.Ink > 0 && s.Ink <= s.Width {
+		text, width = t, s.Ink
+	}
 	ems, n := 0.0, 0
-	for _, r := range s.Text {
+	for _, r := range text {
 		a := advance(advances, r)
 		if a == 0 {
 			return 0, 0, false
@@ -65,7 +75,7 @@ func wordFit(s Span, family string, justified bool) (scale int, tracking float64
 		ems += float64(a) / 1000
 		n++
 	}
-	source := s.Width - float64(n-1)*s.Tracking
+	source := width - float64(n-1)*s.Tracking
 	// Word sets the size in half points: a 6.81pt span is drawn at 7pt.
 	size := float64(halfPoints(s.Size)) / 2
 	if ems == 0 {
@@ -79,20 +89,14 @@ func wordFit(s Span, family string, justified bool) (scale int, tracking float64
 	if math.Abs(ratio-1) >= 0.02 {
 		scale = int(math.Round(ratio * 100))
 	}
-	// Tracking takes up what the whole-percent scale leaves. A wider span
-	// with spaces may be justified: past what the half-point size rounded
-	// away, its extra width is stretched spaces, which Word's own
-	// justification redraws.
+	// Tracking takes up what the whole-percent scale leaves. On a justified
+	// line a wider span's extra width is stretched spaces, which Word's own
+	// justification redraws (tracking them overfilled tightly set lines); on
+	// a ragged line it is the line's width, and dropped, Word set lines short
+	// and pulled the next line's first word up.
 	extra := source - ems*size*float64(scale)/100
-	if strings.Contains(s.Text, " ") && extra > 0 {
-		// the width the half-point size took off (a scale already restores
-		// it; justification spreads it over the spaces, and tracking on a
-		// tightly set justified line overfills it)
-		rounded := 0.0
-		if scale == 100 && !justified {
-			rounded = math.Max(0, ems*(s.Size-size))
-		}
-		extra = math.Min(extra, rounded)
+	if justified && strings.Contains(text, " ") && extra > 0 {
+		extra = 0
 	}
 	return scale, s.Tracking + extra/float64(n), true
 }
@@ -157,4 +161,10 @@ func face(family string, s Span) string {
 		family += "|" + style
 	}
 	return family
+}
+
+// measurable reports whether a face's width table covers every rune of text.
+func measurable(face, text string) bool {
+	advances, ok := faceAdvances[face]
+	return ok && !strings.ContainsFunc(text, func(r rune) bool { return advance(advances, r) == 0 })
 }

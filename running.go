@@ -166,7 +166,7 @@ func pageField(l Line, run int) Line {
 				continue
 			}
 			part := s
-			part.Text, part.X, part.Width = text, x, perRune*float64(utf8.RuneCountInString(text))
+			part.Text, part.X, part.Width, part.Ink = text, x, perRune*float64(utf8.RuneCountInString(text)), 0
 			part.PageNumber = k == 1
 			x += part.Width
 			out.Spans = append(out.Spans, part)

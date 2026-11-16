@@ -112,7 +112,19 @@ function clusters(boxes, pad) {
 // Word's own Wingdings and Webdings draw as text.
 function pictographs(name = "") {
   const family = name.replace(/^[A-Z]{6}\+/, "");
-  return /dingbat|iconic|wingding|webding/i.test(family) && !/^(wingdings( ?[23])?|webdings)(-|,|$)/i.test(family);
+  return (
+    /dingbat|iconic|wingding|webding/i.test(family) &&
+    !/^(wingdings( ?[23])?|webdings)(-|,|$)/i.test(family)
+  );
+}
+
+// A font's weight, or its name's style when it reports none: Type 3 fonts
+// ("NotoSansCJKsc-Bold") carry no weight, and bold headings came out plain.
+function weight(font) {
+  const style = (font?.name ?? "").replace(/^[A-Z]{6}\+/, "").split(/[-,]/)[1] ?? "";
+  // Other weights name a Word family ("Arial Black"), as fontName has it.
+  const named = /bold/i.test(style) && !/semi|demi|extra|ultra/i.test(style) ? 700 : 400;
+  return Math.max(font?.weight ?? 400, named);
 }
 
 function clip(info, b) {
@@ -376,7 +388,7 @@ try {
         baseline,
         size,
         font: font?.name ?? "Arial",
-        weight: font?.weight ?? 400,
+        weight: weight(font),
         // A slant drawn with the text matrix (faux italic) reads as a small
         // angle on glyphs that still advance along one baseline.
         italic: !!(font?.flags & 64) || tilted(text.angles[i]),
@@ -568,9 +580,7 @@ try {
               s.y + s.height <= b.y + b.height + 1)
         ));
     let dense = false;
-    const art =
-      clusters(
-        Array.from({ length: pathCount }, (_, i) => {
+    const boxes = Array.from({ length: pathCount }, (_, i) => {
           const [x0, y0, w0, h0] = objects.paths.boxes.subarray(
             4 * i,
             4 * i + 4
@@ -590,9 +600,30 @@ try {
             height: Math.max(height, 0.5),
             thick,
           };
-        }).filter((b) => !backdrop(b)),
-        2
-      ) ?? ((dense = true), []);
+        }).filter((b) => !backdrop(b));
+    let art = clusters(boxes, 2) ?? ((dense = true), []);
+    // Past the path limit (a map of 20,000 dots) the drawings are too many to
+    // place one by one: the area they cover is kept as one image, drawn
+    // without the page's text, rather than left out.
+    if (pathCount < objects.paths.count) {
+      let union;
+      for (let i = 0; i < objects.paths.count; i++) {
+        const [x0, y0, w0, h0] = objects.paths.boxes.subarray(4 * i, 4 * i + 4);
+        const b = clip(info, { x: x0, y: y0, width: w0, height: h0 });
+        if (!b || backdrop(b)) {
+          continue;
+        }
+        union = union
+          ? {
+              x: Math.min(union.x, b.x),
+              y: Math.min(union.y, b.y),
+              width: Math.max(union.x + union.width, b.x + b.width) - Math.min(union.x, b.x),
+              height: Math.max(union.y + union.height, b.y + b.height) - Math.min(union.y, b.y),
+            }
+          : b;
+      }
+      art = union ? [{ ...union, thick: true }] : [];
+    }
     const underText = (b) =>
       spans.some(
         (s) =>
@@ -601,8 +632,19 @@ try {
           Math.min(s.y + s.height, b.y + b.height) > Math.max(s.y, b.y)
       );
     let skippedArt = false;
-    art.splice(0, art.length, ...art.filter((b) => b.thick || !underText(b)));
+    const drawn = (list) => list.filter((b) => b.thick || !underText(b));
+    art = drawn(art);
     const artRoom = Math.min(50, 100 - images.length);
+    // A map of thousands of dots is more drawings than images a page holds:
+    // nearby drawings merge into fewer, larger images (each still drawn
+    // without the page's text) before any is left out.
+    for (let pad = 8; art.length > artRoom && pad <= 128; pad *= 4) {
+      const merged = clusters(boxes, pad);
+      if (!merged) {
+        break;
+      }
+      art = drawn(merged);
+    }
     if (art.length > artRoom) {
       art.sort((a, b) => b.width * b.height - a.width * a.height);
       art.length = artRoom;
@@ -617,7 +659,7 @@ try {
       addImage(r, true);
     }
     const crowded =
-      leftOut > 0 || dense || skippedArt || pathCount < objects.paths.count;
+      leftOut > 0 || dense || skippedArt;
     const warnings = [];
     if (crowded) {
       warnings.push(

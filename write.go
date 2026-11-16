@@ -168,7 +168,11 @@ func (w *writer) span(b *strings.Builder, s Span) {
 		b.WriteString(`<w:fldSimple w:instr=" PAGE ">`)
 		defer b.WriteString(`</w:fldSimple>`)
 	}
-	fmt.Fprintf(b, `<w:r><w:rPr><w:rFonts w:ascii="%s" w:hAnsi="%s" w:eastAsia="%s" w:cs="%s"/>`, f, f, f, f)
+	east, lang := eastAsian(s)
+	if east == "" {
+		east = family
+	}
+	fmt.Fprintf(b, `<w:r><w:rPr><w:rFonts w:ascii="%s" w:hAnsi="%s" w:eastAsia="%s" w:cs="%s"/>`, f, f, esc(east), f)
 	if s.Weight >= 600 {
 		b.WriteString(`<w:b/><w:bCs/>`)
 	}
@@ -204,12 +208,70 @@ func (w *writer) span(b *strings.Builder, s Span) {
 	if s.Underline {
 		b.WriteString(`<w:u w:val="single"/>`)
 	}
+	if lang != "" {
+		fmt.Fprintf(b, `<w:lang w:eastAsia="%s"/>`, lang)
+	}
 	// A soft hyphen is Word's optional hyphen: shown only where a line breaks.
 	text := strings.ReplaceAll(esc(s.Text), "\u00ad", `</w:t><w:softHyphen/><w:t xml:space="preserve">`)
 	fmt.Fprintf(b, `</w:rPr><w:t xml:space="preserve">%s</w:t></w:r>`, text)
 	if s.Link != "" {
 		b.WriteString(`</w:hyperlink>`)
 	}
+}
+
+// eastAsian is the East Asian font and language for a span's CJK text, from
+// its script (kana is Japanese, Hangul Korean) or its source font's region
+// ("NotoSansCJKsc", "MingLiU"); "" for text without any. Left to Word, Han
+// text took a Japanese fallback without simplified Chinese forms, and 论 or
+// 这 drew blank. The fonts are ones Word installs on Windows and Mac.
+func eastAsian(s Span) (font, lang string) {
+	han, kana, hangul := false, false, false
+	for _, r := range s.Text {
+		switch {
+		case unicode.Is(unicode.Hangul, r):
+			hangul = true
+		case unicode.In(r, unicode.Hiragana, unicode.Katakana):
+			kana = true
+		case unicode.Is(unicode.Han, r):
+			han = true
+		}
+	}
+	if !han && !kana && !hangul {
+		return "", ""
+	}
+	key := fontKey(fontName(s.Font))
+	serif := s.Serif || cjkSerif.MatchString(key)
+	pick := func(serifFont, sansFont, lang string) (string, string) {
+		if serif {
+			return serifFont, lang
+		}
+		return sansFont, lang
+	}
+	switch {
+	case hangul || cjkRegion(key, "kr", "korean", "malgun", "batang", "gulim", "dotum", "myeongjo", "gothicneo"):
+		return pick("Batang", "Malgun Gothic", "ko-KR")
+	case kana || cjkRegion(key, "jp", "japan", "mincho", "gothic", "meiryo", "hiragino", "yugoth", "yumin", "ipa"):
+		return pick("MS Mincho", "MS Gothic", "ja-JP")
+	case cjkRegion(key, "tc", "hk", "tw", "ming", "jhenghei", "big5"):
+		return pick("MingLiU", "MingLiU", "zh-TW")
+	}
+	return pick("SimSun", "SimHei", "zh-CN")
+}
+
+var cjkSerif = regexp.MustCompile(`serif|mincho|ming|song|sun|batang|myeongjo|kai|fang`)
+
+// cjkRegion reports whether a font key names a region: "notosanscjkjp"
+// ends in jp; "msmincho" contains mincho.
+func cjkRegion(key string, marks ...string) bool {
+	for _, m := range marks {
+		if len(m) <= 2 && (strings.HasSuffix(key, m) || strings.Contains(key, "cjk"+m) || strings.Contains(key, m+"regular") || strings.Contains(key, m+"bold")) {
+			return true
+		}
+		if len(m) > 2 && strings.Contains(key, m) {
+			return true
+		}
+	}
+	return false
 }
 
 var numberMarker = regexp.MustCompile(`^\(?(?:\d{1,3}|[a-zA-Z]|[ivxlcIVXLC]{1,5})[.)]$|^\d{1,3}(?:\.\d{1,3})+\.?$`)
@@ -459,6 +521,10 @@ func (w *writer) table(t Table, origin float64) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, `<w:tbl><w:tblPr><w:tblW w:w="%d" w:type="dxa"/><w:jc w:val="left"/><w:tblInd w:w="%d" w:type="dxa"/><w:tblBorders>`, twips(t.right()-t.X), twips(t.X-origin))
 	for _, edge := range []string{"top", "left", "bottom", "right", "insideH", "insideV"} {
+		if edge == "left" && t.OpenLeft || edge == "right" && t.OpenRight {
+			fmt.Fprintf(&b, `<w:%s w:val="nil"/>`, edge)
+			continue
+		}
 		fmt.Fprintf(&b, `<w:%s w:val="single" w:sz="4" w:color="000000"/>`, edge)
 	}
 	b.WriteString(`</w:tblBorders>` + tablePrefix + `</w:tblPr><w:tblGrid>`)

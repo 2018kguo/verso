@@ -58,11 +58,11 @@ func wordFamily(s Span) string {
 }
 
 // Embedded Type 1 fonts often leave the serif flag unset (TeX's Computer
-// Modern, URW's Nimbus Roman): their names say what the flags don't, and
+// Modern and its math fonts, URW's Nimbus Roman): their names say what the flags don't, and
 // set in Arial a serif document grew by pages.
 var (
 	monoName  = regexp.MustCompile(`mono|courier|typewriter|^(cm|lm|ec)tt`)
-	serifName = regexp.MustCompile(`roman|serif|times|mincho|ming|song|garamond|georgia|palatino|bookman|schoolbook|century|termes|stix|libertine|charter|^(cm|lm|ec)(r|mi|bx|ti|sl|csc|sy|ex|u|b)[0-9]`)
+	serifName = regexp.MustCompile(`roman|serif|times|mincho|ming|song|garamond|georgia|palatino|bookman|schoolbook|century|termes|stix|libertine|charter|math|^(cm|lm|ec)(r|mi|bx|ti|sl|csc|sy|ex|u|b)[0-9]|^(msam|msbm|bbold|eufm|eusm|rsfs)[0-9]`)
 )
 
 // wordFit is the character scale, in percent, and the tracking, in points,
@@ -121,6 +121,9 @@ func wordFit(s Span, family string, justified bool) (scale int, tracking float64
 
 func halfPoints(size float64) int { return max(1, int(math.Round(size*2))) }
 func advance(advances []uint16, r rune) uint16 {
+	if fullWidth(r) {
+		return 1000 // a CJK font's ideographs, kana, Hangul and full-width forms
+	}
 	at := 0
 	for _, rg := range metricRanges {
 		if r >= rg[0] && r <= rg[1] {
@@ -132,6 +135,14 @@ func advance(advances []uint16, r rune) uint16 {
 		at += int(rg[1]-rg[0]) + 1
 	}
 	return 0
+}
+
+// fullWidth reports whether a rune sets one em wide in every CJK font, so a
+// run of it fits its source width whichever East Asian font Word draws:
+// SimSun set a Chinese line 1% wider than its source, and lines wrapped.
+func fullWidth(r rune) bool {
+	return r >= 0x3000 && r <= 0x30ff || r >= 0x3400 && r <= 0x4dbf || r >= 0x4e00 && r <= 0x9fff ||
+		r >= 0xac00 && r <= 0xd7af || r >= 0xf900 && r <= 0xfaff || r >= 0xff01 && r <= 0xff60
 }
 
 // spaceWidth is a space's width in the family and size Word lays s out in,

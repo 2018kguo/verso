@@ -2,7 +2,7 @@ name	converter	valid	pages	source pages	ink F1
 paper	verso	valid	17	17	0.987
 paper	pdf2docx	invalid	18	17	0.631
 paper	libreoffice	invalid	17	17	0.686
-wikipedia-ja	verso	valid	14	14	0.947
+wikipedia-ja	verso	valid	14	14	0.940
 wikipedia-ja	pdf2docx	invalid	15	14	0.747
 wikipedia-ja	libreoffice	invalid	14	14	0.490
 bill	verso	valid	3	3	0.968
@@ -11,7 +11,7 @@ bill	libreoffice	invalid	3	3	0.518
 aes	verso	valid	46	46	0.974
 aes	pdf2docx	invalid	54	46	0.363
 aes	libreoffice	invalid	46	46	0.407
-w4	verso	valid	4	4	0.965
+w4	verso	valid	4	4	0.972
 w4	pdf2docx	invalid	4	4	0.956
 w4	libreoffice	invalid	4	4	0.703
 court-form	verso	valid	2	2	0.982

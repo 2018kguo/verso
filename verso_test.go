@@ -1989,7 +1989,7 @@ func TestSymbolFontUnicodeBulletGetsATextFace(t *testing.T) {
 // Type 1 fonts with no serif flag are classed by their names: TeX's Computer
 // Modern and URW's Nimbus Roman are serif, CMTT is a typewriter face.
 func TestFontNamesClassUnflaggedFaces(t *testing.T) {
-	for font, want := range map[string]string{"NimbusRomNo9L-Regu": "Times New Roman", "CMR10": "Times New Roman", "CMMI10": "Times New Roman", "CMTT12": "Courier New", "NimbusSanL-Bold": "Arial", "SourceSansPro-Regular": "Arial", "CMSS10": "Arial"} {
+	for font, want := range map[string]string{"NimbusRomNo9L-Regu": "Times New Roman", "CMR10": "Times New Roman", "CMMI10": "Times New Roman", "CMTT12": "Courier New", "LMMathItalic12-Regular": "Times New Roman", "MSAM10": "Times New Roman", "NimbusSanL-Bold": "Arial", "SourceSansPro-Regular": "Arial", "CMSS10": "Arial"} {
 		s := span("x", 72, 100, 5)
 		s.Font = font
 		if got := wordFamily(s); got != want {
@@ -2096,5 +2096,130 @@ func TestDingbatGlyphsKeepTheirLook(t *testing.T) {
 	}
 	if text != "Yes" || len(pages[0].Images) == 0 {
 		t.Fatalf("text %q, %d images: want the dingbat as an image beside the text", text, len(pages[0].Images))
+	}
+}
+
+// A form leaves its page-edge side open: the rules run on past the last
+// vertical. The grid reaches where they end, so a row's full-width text is
+// not squeezed into the last vertical's column, and that side draws no rule.
+func TestOpenSidedGridReachesItsRules(t *testing.T) {
+	p := Page{Width: 612, Height: 792}
+	for _, y := range []float64{100, 140, 180} {
+		p.Segments = append(p.Segments, Segment{X1: 36, Y1: y, X2: 576, Y2: y})
+	}
+	p.Segments = append(p.Segments, Segment{X1: 94, Y1: 100, X2: 94, Y2: 180}, Segment{X1: 389, Y1: 140, X2: 389, Y2: 180}, Segment{X1: 468, Y1: 140, X2: 468, Y2: 180})
+	p.Spans = []Span{span("Under penalties of perjury, I declare that this certificate is true, correct, and complete.", 98, 104, 450),
+		span("Employer identification", 474, 144, 82)}
+	l, err := layout(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(l.Tables) != 1 {
+		t.Fatalf("%d tables", len(l.Tables))
+	}
+	tb := l.Tables[0]
+	if tb.XS[0] > 37 || tb.right() < 575 || !tb.OpenLeft || !tb.OpenRight {
+		t.Fatalf("grid XS %v open %v/%v: want it to reach the rules' ends with both sides open", tb.XS, tb.OpenLeft, tb.OpenRight)
+	}
+	var b bytes.Buffer
+	if _, err := Write(&b, []Page{p}); err != nil {
+		t.Fatal(err)
+	}
+	if doc := docParts(t, b.Bytes())["word/document.xml"]; !strings.Contains(doc, `<w:left w:val="nil"/>`) || !strings.Contains(doc, `<w:right w:val="nil"/>`) {
+		t.Fatal("open sides drew a rule")
+	}
+}
+
+// CJK text names its East Asian font by script and source region: left to
+// Word, simplified Chinese took a Japanese fallback and 论 drew blank.
+func TestEastAsianFontFollowsScriptAndRegion(t *testing.T) {
+	for _, c := range []struct{ font, text, want, lang string }{
+		{"AAAAAA+NotoSansCJKsc-Regular", "所有这些理论", "SimHei", "zh-CN"},
+		{"CAAAAA+NotoSerifCJKsc-Regular", "理论", "SimSun", "zh-CN"},
+		{"NotoSansCJKtc-Regular", "這些理論", "MingLiU", "zh-TW"},
+		{"NotoSansCJKjp-Regular", "周期表", "MS Gothic", "ja-JP"},
+		{"Arial", "ウィキペディア", "MS Gothic", "ja-JP"},
+		{"Arial", "주기율표", "Malgun Gothic", "ko-KR"},
+		{"Arial", "Plain text", "", ""},
+	} {
+		s := span(c.text, 72, 100, 50)
+		s.Font = c.font
+		if font, lang := eastAsian(s); font != c.want || lang != c.lang {
+			t.Errorf("%s %q: %s %s, want %s %s", c.font, c.text, font, lang, c.want, c.lang)
+		}
+	}
+}
+
+// A map of more dots than the path limit keeps its drawing as one image of
+// the area the dots cover, not none at all.
+func TestTooManyPathsKeepTheirArea(t *testing.T) {
+	opts := integrationOptions(t)
+	input, output := filepath.Join(t.TempDir(), "map.pdf"), filepath.Join(t.TempDir(), "map.docx")
+	var content strings.Builder
+	content.WriteString("BT /F1 12 Tf 72 740 Td (Figure 3. Wells by county) Tj ET\n0.5 g\n")
+	for i := 0; i < 20_500; i++ {
+		fmt.Fprintf(&content, "%d %d 1 1 re f\n", 100+i%400, 200+i/400*4)
+	}
+	writePDF(t, input, []string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Count 1 /Kids [3 0 R] >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+		"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+		fmt.Sprintf("<< /Length %d >>\nstream\n%sendstream", content.Len(), content.String()),
+	})
+	opts.AllowWarnings = true
+	report, err := Convert(context.Background(), input, output, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Images == 0 || len(report.Warnings) > 0 {
+		t.Fatalf("report %+v: want the dots kept as an image, nothing left out", report)
+	}
+}
+
+// CJK text fits its source width like Latin text: ideographs and full-width
+// punctuation set one em in every CJK font.
+func TestCJKRunFitsItsSourceWidth(t *testing.T) {
+	s := span("所有这些理论，2016年", 72, 100, 0)
+	s.Size = 10
+	_, tracking, ok := wordFit(s, wordFamily(s), false)
+	if ok {
+		t.Fatalf("zero width fits: %v", tracking)
+	}
+	s.Width = 8*10 + emsIn(s, "2016")*10 + 8*0.2 // 8 em-wide runes, 4 digits, 0.2pt apart
+	scale, tracking, ok := wordFit(s, wordFamily(s), false)
+	if !ok || scale != 100 || math.Abs(tracking-8*0.2/12) > 0.01 {
+		t.Fatalf("fit %d %.3f %v: want the source's extra width as tracking", scale, tracking, ok)
+	}
+}
+
+var toUnicodeH = func() string {
+	cmap := "/CIDInit /ProcSet findresource begin 12 dict begin begincmap /CMapName /H def 1 begincodespacerange <00> <FF> endcodespacerange 1 beginbfchar <48> <0048> endbfchar endcmap CMapName currentdict /CMap defineresource pop end end\n"
+	return fmt.Sprintf("<< /Length %d >>\nstream\n%sendstream", len(cmap), cmap)
+}()
+
+// A font reporting no weight is bold when its name's style says so (Type 3
+// "NotoSansCJKsc-Bold" headings came out plain).
+func TestBoldFromTheFontName(t *testing.T) {
+	opts := integrationOptions(t)
+	input := filepath.Join(t.TempDir(), "bold.pdf")
+	content := "BT /F1 14 Tf 72 700 Td (HHH) Tj ET\n"
+	glyph := "600 0 0 0 600 700 d1 0 0 600 700 re f\n"
+	writePDF(t, input, []string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Count 1 /Kids [3 0 R] >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+		"<< /Type /Font /Subtype /Type3 /Name /AAAAAA+ExampleSans-Bold /FontBBox [0 0 600 700] /FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << /H 6 0 R >> /Encoding << /Type /Encoding /Differences [72 /H] >> /FirstChar 72 /LastChar 72 /Widths [600] /FontDescriptor 7 0 R /ToUnicode 8 0 R >>",
+		fmt.Sprintf("<< /Length %d >>\nstream\n%sendstream", len(content), content),
+		fmt.Sprintf("<< /Length %d >>\nstream\n%sendstream", len(glyph), glyph),
+		"<< /Type /FontDescriptor /FontName /AAAAAA+ExampleSans-Bold /Flags 32 /FontBBox [0 0 600 700] /ItalicAngle 0 /Ascent 700 /Descent 0 /CapHeight 700 /StemV 80 >>",
+		toUnicodeH,
+	})
+	pages, err := Extract(context.Background(), input, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pages[0].Spans) == 0 || pages[0].Spans[0].Weight < 600 {
+		t.Fatalf("spans %+v: want the heading bold", pages[0].Spans)
 	}
 }

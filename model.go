@@ -52,12 +52,39 @@ type Cell struct {
 	Continue, Merge bool
 }
 type Table struct {
-	X, Y   float64
-	XS, YS []float64
-	Rows   [][]Cell
+	X, Y                float64
+	XS, YS              []float64
+	Rows                [][]Cell
+	OpenLeft, OpenRight bool // no rule on that side: the grid's rules run on past it
 }
 
 func (t Table) right() float64 { return t.XS[len(t.XS)-1] }
+
+// openSides adds an edge where a grid's top and bottom rules run on past
+// its outermost vertical rule: forms often leave the page-edge side open
+// ("Employer identification number" beside the last rule), and a grid
+// bounded at its last vertical squeezed a full-width row's text into a
+// wrapped, clipped cell.
+func openSides(g []Segment, xs, ys []float64) (_ []float64, left, right bool) {
+	reach := func(y float64) (lo, hi float64) {
+		lo, hi = math.Inf(1), math.Inf(-1)
+		for _, s := range g {
+			if s.Y2-s.Y1 < 1 && math.Abs(s.Y1-y) < 1.5 {
+				lo, hi = math.Min(lo, s.X1), math.Max(hi, s.X2)
+			}
+		}
+		return lo, hi
+	}
+	topLo, topHi := reach(ys[0])
+	bottomLo, bottomHi := reach(ys[len(ys)-1])
+	if hi := math.Min(topHi, bottomHi); hi > xs[len(xs)-1]+3 && math.Abs(topHi-bottomHi) < 3 {
+		xs, right = append(xs, hi), true
+	}
+	if lo := math.Max(topLo, bottomLo); lo < xs[0]-3 && math.Abs(topLo-bottomLo) < 3 {
+		xs, left = append([]float64{lo}, xs...), true
+	}
+	return xs, left, right
+}
 
 type Layout struct {
 	Items  []Item
@@ -436,6 +463,10 @@ grids:
 			}
 		}
 		xs, ys := cluster(xx), cluster(yy)
+		var openLeft, openRight bool
+		if len(xs) >= 2 && len(ys) >= 2 {
+			xs, openLeft, openRight = openSides(g, xs, ys)
+		}
 		if len(xs) < 3 || len(ys) < 3 {
 			continue
 		}
@@ -443,7 +474,7 @@ grids:
 			continue // too fine to be a Word table; its text stays in the flow
 		}
 		claimed := append([]bool(nil), assigned...)
-		table := Table{X: xs[0], Y: ys[0], XS: xs, YS: ys}
+		table := Table{X: xs[0], Y: ys[0], XS: xs, YS: ys, OpenLeft: openLeft, OpenRight: openRight}
 		wall := func(x, y float64, vertical bool) bool {
 			for _, s := range g {
 				if vertical && s.X2-s.X1 < 1 && math.Abs(s.X1-x) < 1.5 && s.Y1 <= y+1 && s.Y2 >= y-1 {

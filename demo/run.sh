@@ -6,6 +6,9 @@
 #
 #   VALIDATOR=path/to/verso-validate.dll PDF2DOCX=path/to/pdf2docx [KEEP=dir] demo/run.sh [NAME...]
 #
+# SOURCES (a sources.tsv), OUT (where images and results go) and CONVERTERS
+# ("verso" alone is fastest) point it at another set of PDFs.
+#
 # macOS with Microsoft Word, LibreOffice (soffice), Poppler and Pillow. The
 # source PDFs are not part of this repository; see sources.tsv for licenses.
 set -eu
@@ -38,7 +41,8 @@ valid() { dotnet "$VALIDATOR" "$1" >/dev/null 2>&1 && echo valid || echo invalid
 pages() { pdfinfo "$1" 2>/dev/null | awk '/^Pages/{print $2}'; }
 
 (cd "$R" && go build -o "$box/verso" ./cmd/verso)
-results="$D/results.tsv"
+S=${SOURCES:-$D/sources.tsv}; O=${OUT:-$D}; mkdir -p "$O"
+results="$O/results.tsv"
 [ $# -eq 0 ] && printf 'name\tconverter\tvalid\tpages\tsource pages\tink F1\n' > "$results"
 while IFS="$(printf '\t')" read -r n page sha url license <&3; do
   [ "$n" = name ] && continue
@@ -48,13 +52,16 @@ while IFS="$(printf '\t')" read -r n page sha url license <&3; do
   [ "$sha" = - ] || echo "$sha  $w/in.pdf" | shasum -a 256 -c --quiet
   pdftoppm -r 50 -png "$w/in.pdf" "$w/source/p"
   pdftoppm -r 100 -f "$page" -l "$page" -png -singlefile "$w/in.pdf" "$w/source-page"
-  "$box/verso" --allow-warnings "$w/in.pdf" "$w/verso.docx" >/dev/null || true
-  ${PDF2DOCX:-pdf2docx} convert "$w/in.pdf" "$w/pdf2docx.docx" >/dev/null 2>&1 || true
-  soffice --headless --infilter=writer_pdf_import --convert-to 'docx:MS Word 2007 XML' --outdir "$w" "$w/in.pdf" >/dev/null 2>&1 || true
-  [ -f "$w/in.docx" ] && mv "$w/in.docx" "$w/libreoffice.docx"
+  want() { echo " ${CONVERTERS:-verso pdf2docx libreoffice} " | grep -q " $1 "; }
+  want verso && { "$box/verso" --allow-warnings "$w/in.pdf" "$w/verso.docx" >/dev/null || true; }
+  want pdf2docx && { ${PDF2DOCX:-pdf2docx} convert "$w/in.pdf" "$w/pdf2docx.docx" >/dev/null 2>&1 || true; }
+  if want libreoffice; then
+    soffice --headless --infilter=writer_pdf_import --convert-to 'docx:MS Word 2007 XML' --outdir "$w" "$w/in.pdf" >/dev/null 2>&1 || true
+    [ -f "$w/in.docx" ] && mv "$w/in.docx" "$w/libreoffice.docx"
+  fi
   panels=""; nl='
 '
-  for c in verso pdf2docx libreoffice; do
+  for c in ${CONVERTERS:-verso pdf2docx libreoffice}; do
     v=failed; np=0; score=0.000
     if [ -f "$w/$c.docx" ]; then
       v=$(valid "$w/$c.docx")
@@ -70,6 +77,6 @@ while IFS="$(printf '\t')" read -r n page sha url license <&3; do
     panels="$panels$c · $v · Ink F1 $score=$w/$c-page.png$nl"
   done
   # Labels carry spaces: split the panel list on newlines only.
-  (IFS=$nl; python3 "$D/compose.py" sheet "$D/$n.png" "$w/source-page.png" $panels)
+  (IFS=$nl; python3 "$D/compose.py" sheet "$O/$n.png" "$w/source-page.png" $panels)
   [ -n "${KEEP:-}" ] && cp -R "$w" "$KEEP/" # the PDFs, documents and renders, for a closer look
-done 3<"$D/sources.tsv"
+done 3<"$S"

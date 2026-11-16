@@ -31,10 +31,10 @@ from the source means text flowed onto the wrong pages.
 | | verso | pdf2docx 0.5.13 | LibreOffice 26.2 |
 |---|---|---|---|
 | Physics paper, 17 pp | **valid**, Ink F1 **0.987** | invalid, 0.631, 18 pp | invalid, 0.686 |
-| Japanese Wikipedia, 14 pp | **valid**, **0.947** | invalid, 0.747, 15 pp | invalid, 0.490 |
+| Japanese Wikipedia, 14 pp | **valid**, **0.940** | invalid, 0.747, 15 pp | invalid, 0.490 |
 | H.R. 82 bill, 3 pp | **valid**, **0.968** | invalid, 0.957 | invalid, 0.518 |
 | NIST FIPS 197 (AES), 46 pp | **valid**, **0.974** | invalid, 0.363, 54 pp | invalid, 0.407 |
-| IRS Form W-4, 4 pp | **valid**, **0.965** | invalid, 0.956 | invalid, 0.703 |
+| IRS Form W-4, 4 pp | **valid**, **0.972** | invalid, 0.956 | invalid, 0.703 |
 | U.S. Courts AO 240, 2 pp | **valid**, **0.982** | invalid, 0.963 | invalid, 0.239 |
 
 Each image shows one page: the source PDF, then verso, pdf2docx and LibreOffice.
@@ -46,10 +46,9 @@ Each image shows one page: the source PDF, then verso, pdf2docx and LibreOffice.
 ![IRS W-4](demo/w4.png)
 ![Court form](demo/court-form.png)
 
-Known gaps, visible above:
-- The W-4's signature line overprints its label.
-- Text set in a font Word lacks is drawn in a substitute fitted to the
-  source width, so its letterforms differ from the source.
+Known gap, visible above: text set in a font Word lacks is drawn in a
+substitute fitted to the source width, so its letterforms differ from the
+source.
 
 `demo/run.sh` downloads the sources, checks their hashes and rebuilds the
 images and `demo/results.tsv`. The PDFs are not in this repository.

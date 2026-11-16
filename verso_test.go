@@ -1970,3 +1970,17 @@ func TestHugeHorizontalScaleConverts(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A bullet the PDF draws from Symbol but decodes to "•" is blank in Word's
+// Symbol (it draws only private-use codes): it is written in a text face. A
+// private-use Wingdings bullet keeps its font.
+func TestSymbolFontUnicodeBulletGetsATextFace(t *testing.T) {
+	bullet, wing := span("\u2022", 72, 100, 4), span("\uF0A7", 72, 120, 4)
+	bullet.Font, wing.Font = "SymbolMT", "Wingdings-Regular"
+	if got := wordFamily(bullet); got == "Symbol" {
+		t.Fatalf("a Unicode bullet stays in Symbol, which Word draws blank")
+	}
+	if got := wordFamily(wing); got != "Wingdings" {
+		t.Fatalf("private-use Wingdings bullet: %q, want Wingdings", got)
+	}
+}

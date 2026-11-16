@@ -25,10 +25,18 @@ func init() {
 	}
 }
 
+var symbolFonts = map[string]bool{fontKey("Symbol"): true, fontKey("Wingdings"): true, fontKey("Wingdings 2"): true, fontKey("Wingdings 3"): true, fontKey("Webdings"): true}
+
 // wordFamily is the family Word will lay a span out in: its own when Word has
 // it, else a substitute with known metrics in the span's class.
 func wordFamily(s Span) string {
 	family := fontName(s.Font)
+	// Word draws a symbol font only at its private-use codes (U+F020–F0FF):
+	// a bullet decoded to "•" in Symbol came out blank. Real Unicode goes to
+	// a text face.
+	if symbolFonts[fontKey(family)] && strings.ContainsFunc(s.Text, func(r rune) bool { return r < 0xF000 || r > 0xF0FF }) {
+		family = ""
+	}
 	if officeFonts[fontKey(family)] {
 		return family
 	}

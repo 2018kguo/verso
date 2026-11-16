@@ -14,6 +14,23 @@ verso finds Recto through `$VERSO_RECTO_MODULE`, a `node_modules` above the
 directory, so converting a file inside an untrusted folder can't load code
 planted there.
 
+## Demo
+
+Three original documents (in `demo/`, fictional content) were exported to PDF
+by Microsoft Word. Each converter turned the PDF back into `.docx`, and Word
+rendered the result. Each image shows page 1 in that order: the source PDF,
+then verso, pdf2docx 0.5.13 and LibreOffice. Rebuild with `demo/run.sh`.
+
+| | verso | pdf2docx | LibreOffice |
+|---|---|---|---|
+| Contract (justified clauses, leader-dot contents) | **valid**, Ink F1 0.996, 2/2 pages | invalid, 0.440, 3 pages | invalid, 0.204 |
+| Report (bullets, shaded table, header and footer) | **valid**, 1.000 | invalid, 0.474, 2 pages | invalid, 0.259 |
+| Invoice (merged cells, right-aligned amounts) | **valid**, 0.998 | invalid, 0.966 | invalid, 0.288 |
+
+![Contract: source, verso, pdf2docx, LibreOffice](demo/contract.png)
+![Report](demo/report.png)
+![Invoice](demo/invoice.png)
+
 ## Why
 
 The common open-source converters produce `.docx` files that Word opens but
@@ -43,25 +60,26 @@ The scores are measured against real Word renders. Each source `.docx` was
 exported to PDF by Microsoft Word for Mac; each converter turned that PDF back
 into `.docx`; and Word rendered the result again. Scores compare the round
 trip with the source. All runs used the same machine, and medians are wall
-clock.
+clock (the three converters ran in one session, sharing the machine with
+Word's renders).
 
 Round trip of 22 Word documents (contracts, statements of work, reports):
 
 | Converter | Valid OOXML | Text recall | Ink F1 | ¶ recall | Pages | Median |
 |---|---|---|---|---|---|---|
-| **verso** | **20/20** (2 RTL refused) | **1.000** | **0.895** | **0.790** | 19/20 | **410 ms** |
-| pdf2docx 0.5.13 | 0/22 | 0.943 | 0.689 | 0.622 | 19/22 | 866 ms |
-| LibreOffice 26.2 (`soffice --convert-to docx`) | 0/22 | 0.924 | 0.350 | 0.330 | 22/22 | 1926 ms |
+| **verso** | **20/20** (2 RTL refused) | **1.000** | **0.992** | **0.865** | 20/20 | **560 ms** |
+| pdf2docx 0.5.13 | 0/22 | 0.943 | 0.689 | 0.623 | 19/22 | 944 ms |
+| LibreOffice 26.2 (`soffice --convert-to docx`) | 0/22 | 0.924 | 0.350 | 0.331 | 22/22 | 2824 ms |
 
 21 public business and legal PDFs (loan agreements, deeds, FDA forms,
 signature packets) with no source `.docx`. They are scored against the PDF's
 own render:
 
-| Converter | Valid OOXML | Text recall | Ink F1 | Median |
-|---|---|---|---|---|
-| **verso** | **21/21** | 0.996 | **0.783** | **386 ms** |
-| pdf2docx 0.5.13 | 0/20 (1 failed) | 0.997 | 0.552 | 793 ms |
-| LibreOffice | 0/21 | 1.000 | 0.182 | 1911 ms |
+| Converter | Valid OOXML | Text recall | Ink F1 | Pages | Median |
+|---|---|---|---|---|---|
+| **verso** | **21/21** | 0.996 | **0.982** | **21/21** | **1009 ms** |
+| pdf2docx 0.5.13 | 0/20 (1 failed) | 0.997 | 0.610 | 16/21 | 2509 ms |
+| LibreOffice | 0/21 | 1.000 | 0.177 | 21/21 | 3900 ms |
 
 - **Text recall**: share of the source's words found in the rendered output.
 - **Ink F1**: pixel overlap between page renders. It measures whether the
@@ -113,6 +131,11 @@ go build -o verso ./cmd/verso && go build -o verso-bench ./bench
    size. Paragraph spacing comes from absolute positions, so errors
    don't accumulate down the page. PostScript font names map to their family
    names, and `fontTable.xml` names an Office substitute for fonts Word lacks.
+   Each run is fitted to its source width in the face Word will draw it in
+   (character scale plus tracking), so lines break where the PDF's did.
+   `metrics_gen.go` holds advance widths for that, read by `gen_metrics.go`
+   from the LibreOffice fonts (Liberation, Carlito, Caladea) and from
+   Word's bundled Verdana; only the numbers are committed, no font files.
    Pages taller than 22 inches are scaled to fit. Lines that repeat in the
    top or bottom margin on three or more pages become a Word header or
    footer, a counting page number becomes a `PAGE` field.

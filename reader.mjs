@@ -11,7 +11,10 @@ const doc = await openPdf(new Uint8Array(fs.readFileSync(file))).catch(
     process.exit(1);
   }
 );
-const say = (value) => fs.writeSync(1, `${JSON.stringify(value)}\n`);
+const say = (value) => {
+  fs.writeSync(1, JSON.stringify(value)); // not concatenated: pages run to megabytes
+  fs.writeSync(1, "\n");
+};
 
 // level reports a glyph whose run advances along a horizontal baseline:
 // its neighbour in the same text object sits beside it, not above.
@@ -121,9 +124,11 @@ function pictographs(name = "") {
 // A font's weight, or its name's style when it reports none: Type 3 fonts
 // ("NotoSansCJKsc-Bold") carry no weight, and bold headings came out plain.
 function weight(font) {
-  const style = (font?.name ?? "").replace(/^[A-Z]{6}\+/, "").split(/[-,]/)[1] ?? "";
+  const style =
+    (font?.name ?? "").replace(/^[A-Z]{6}\+/, "").split(/[-,]/)[1] ?? "";
   // Other weights name a Word family ("Arial Black"), as fontName has it.
-  const named = /bold/i.test(style) && !/semi|demi|extra|ultra/i.test(style) ? 700 : 400;
+  const named =
+    /bold/i.test(style) && !/semi|demi|extra|ultra/i.test(style) ? 700 : 400;
   return Math.max(font?.weight ?? 400, named);
 }
 
@@ -199,7 +204,7 @@ function png(bitmap) {
   // zeros that deflate at a fast level squeezes well.
   const { width, height, rgba } = bitmap;
   const stride = 1 + width * 3;
-  const rows = Buffer.alloc(height * stride);
+  const rows = Buffer.allocUnsafe(height * stride); // every byte written
   for (let i = 0, o = 0, y = 0; y < height; y++) {
     rows[o++] = 2;
     for (let x = 0; x < width; x++, i += 4) {
@@ -214,7 +219,7 @@ function png(bitmap) {
     const header = Buffer.alloc(4);
     header.writeUInt32BE(data.length);
     const crc = Buffer.alloc(4);
-    crc.writeUInt32BE(crc32(Buffer.concat([type, data])));
+    crc.writeUInt32BE(crc32(data, crc32(type)));
     return Buffer.concat([header, type, data, crc]);
   };
   const header = Buffer.alloc(13);
@@ -254,7 +259,7 @@ try {
       height: info.height,
       ...rest,
       warnings,
-      images: rendered.map(({ truncated, ...image }) => image),
+      images: rendered.map(({ truncated: _, ...image }) => image),
     });
   };
   for (let pageIndex = 0; pageIndex < doc.pageCount; pageIndex++) {
@@ -279,6 +284,9 @@ try {
     // Past these, vector art and images are left out, not the page.
     const pathCount = objects.paths.count > 20_000 ? 0 : objects.paths.count;
     const fonts = text.fonts;
+    // Per font, not per glyph: both read the font's name.
+    const weights = fonts.map(weight);
+    const pictures = fonts.map((f) => pictographs(f?.name));
     const links = doc.links(pageIndex);
     const glyphs = [];
     // Glyphs Word cannot carry as text (no Unicode, or rotated) keep their
@@ -287,11 +295,12 @@ try {
     let droppedLinks = 0;
     let last;
     for (let i = 0; i < text.count; i++) {
+      const tilt = tilted(text.angles[i]);
       if (
         text.flags[i] & 2 ||
         text.codepoints[i] === 0xff_fd ||
-        pictographs(fonts[text.fontIds[i]]?.name) ||
-        (tilted(text.angles[i]) && !level(text, i))
+        pictures[text.fontIds[i]] ||
+        (tilt && !level(text, i))
       ) {
         const [x, y, width, height] = text.boxes.subarray(4 * i, 4 * i + 4);
         // Clipped first: a glyph box miles off the page would span millions
@@ -356,13 +365,15 @@ try {
       }
       const font = fonts[text.fontIds[i]];
       const baseline = run >= 0 ? text.runs.origins[run * 2 + 1] : y + height;
-      const target = links.find(
-        ({ box }) =>
-          x + width / 2 >= box.x &&
-          x + width / 2 <= box.x + box.width &&
-          y + height / 2 >= box.y &&
-          y + height / 2 <= box.y + box.height
-      )?.target;
+      const target =
+        links.length > 0 &&
+        links.find(
+          ({ box }) =>
+            x + width / 2 >= box.x &&
+            x + width / 2 <= box.x + box.width &&
+            y + height / 2 >= box.y &&
+            y + height / 2 <= box.y + box.height
+        )?.target;
       let link = "";
       if (target?.kind === "uri") {
         // Only web and mail links become Word hyperlinks; others keep their text.
@@ -388,10 +399,10 @@ try {
         baseline,
         size,
         font: font?.name ?? "Arial",
-        weight: weight(font),
+        weight: weights[text.fontIds[i]] ?? 400,
         // A slant drawn with the text matrix (faux italic) reads as a small
         // angle on glyphs that still advance along one baseline.
-        italic: !!(font?.flags & 64) || tilted(text.angles[i]),
+        italic: !!(font?.flags & 64) || tilt,
         serif: !!(font?.flags & 2),
         mono: !!(font?.flags & 1),
         color,
@@ -414,6 +425,24 @@ try {
       a.weight === b.weight &&
       a.italic === b.italic &&
       a.scale === b.scale;
+    // A glyph the next one starts well inside advances only to it: CJK
+    // punctuation set half width ("）、") kept its full em box, and Word drew
+    // it full width and wrapped the line. Not a space (a page number drawn
+    // over one split its paragraph), an overprint (faux bold) or a combining
+    // mark, which start near the glyph's own x.
+    for (let i = 0; i + 1 < glyphs.length; i++) {
+      const g = glyphs[i],
+        next = glyphs[i + 1];
+      if (
+        g.text.trim() &&
+        next.x - (g.x + g.width) < -Math.max(0.5, g.size * 0.12) &&
+        next.x - g.x >= 0.4 * g.width &&
+        Math.abs(next.baseline - g.baseline) < 0.2 &&
+        !/\p{M}/u.test(next.text)
+      ) {
+        g.width = next.x - g.x;
+      }
+    }
     // Boxes carry advances, not tight ink widths. Keep the extra source
     // advance as ordinary Word tracking, which survives edits and rendering.
     for (let i = 0; i < glyphs.length; i++) {
@@ -430,6 +459,8 @@ try {
     }
     const spans = [];
     last = undefined;
+    let advance = 0; // last's glyph advances and glyph count
+    let count = 0;
     let tabbed; // the baseline of a tab just drawn
     for (const g of glyphs) {
       // A drawn tab ends its span: the next text starts at its own x, which
@@ -447,40 +478,32 @@ try {
         last && !g.text.trim() && Math.abs(last.baseline - g.baseline) < 0.5;
       // One average tracking must place each glyph near its source x;
       // producers that nudge every glyph otherwise yield a run per letter.
-      const at = last && last.x + last.advance + last.count * last.tracking;
+      const at = last && last.x + advance + count * last.tracking;
       if (
         space ||
         (sameStyle(last, g) &&
           Math.abs(g.x - at) <= Math.max(0.3, g.size * 0.04))
       ) {
         if (!space) {
-          last.tracking = (g.x - last.x - last.advance) / last.count;
+          last.tracking = (g.x - last.x - advance) / count;
         }
         last.text += g.text;
         last.width = Math.max(last.width, g.x + g.width - last.x);
         if (g.text.trim()) {
           last.ink = g.x + g.width - last.x;
         }
-        last.advance += g.width;
-        last.count++;
+        advance += g.width;
+        count++;
       } else {
         const tab = tabbed !== undefined && Math.abs(tabbed - g.baseline) < 0.5;
         // ink: the width to the last glyph that isn't a space, whose
         // advance a justified line stretches.
-        last = {
-          ...g,
-          advance: g.width,
-          count: 1,
-          tab,
-          ink: g.text.trim() ? g.width : 0,
-        };
+        last = { ...g, tab, ink: g.text.trim() ? g.width : 0 };
+        advance = g.width;
+        count = 1;
         spans.push(last);
       }
       tabbed = undefined;
-    }
-    for (const s of spans) {
-      delete s.advance;
-      delete s.count;
     }
     const segments = [];
     for (let i = 0; i < pathCount; i++) {
@@ -581,26 +604,23 @@ try {
         ));
     let dense = false;
     const boxes = Array.from({ length: pathCount }, (_, i) => {
-          const [x0, y0, w0, h0] = objects.paths.boxes.subarray(
-            4 * i,
-            4 * i + 4
-          );
-          // Clip to the page: a fill drawn far past the edge is a backdrop.
-          const x = Math.max(x0, 0);
-          const y = Math.max(y0, 0);
-          const width = Math.min(x0 + w0, info.width) - x;
-          const height = Math.min(y0 + h0, info.height) - y;
-          // Thin paths are rules: table borders and underlines, rebuilt in Word.
-          const thick =
-            Math.min(width, height) > 1.5 && !!(objects.paths.flags[i] & 1);
-          return {
-            x,
-            y,
-            width: Math.max(width, 0.5),
-            height: Math.max(height, 0.5),
-            thick,
-          };
-        }).filter((b) => !backdrop(b));
+      const [x0, y0, w0, h0] = objects.paths.boxes.subarray(4 * i, 4 * i + 4);
+      // Clip to the page: a fill drawn far past the edge is a backdrop.
+      const x = Math.max(x0, 0);
+      const y = Math.max(y0, 0);
+      const width = Math.min(x0 + w0, info.width) - x;
+      const height = Math.min(y0 + h0, info.height) - y;
+      // Thin paths are rules: table borders and underlines, rebuilt in Word.
+      const thick =
+        Math.min(width, height) > 1.5 && !!(objects.paths.flags[i] & 1);
+      return {
+        x,
+        y,
+        width: Math.max(width, 0.5),
+        height: Math.max(height, 0.5),
+        thick,
+      };
+    }).filter((b) => !backdrop(b));
     let art = clusters(boxes, 2) ?? ((dense = true), []);
     // Past the path limit (a map of 20,000 dots) the drawings are too many to
     // place one by one: the area they cover is kept as one image, drawn
@@ -617,8 +637,12 @@ try {
           ? {
               x: Math.min(union.x, b.x),
               y: Math.min(union.y, b.y),
-              width: Math.max(union.x + union.width, b.x + b.width) - Math.min(union.x, b.x),
-              height: Math.max(union.y + union.height, b.y + b.height) - Math.min(union.y, b.y),
+              width:
+                Math.max(union.x + union.width, b.x + b.width) -
+                Math.min(union.x, b.x),
+              height:
+                Math.max(union.y + union.height, b.y + b.height) -
+                Math.min(union.y, b.y),
             }
           : b;
       }
@@ -658,8 +682,7 @@ try {
     for (const r of regions.slice(0, Math.max(0, 100 - images.length))) {
       addImage(r, true);
     }
-    const crowded =
-      leftOut > 0 || dense || skippedArt;
+    const crowded = leftOut > 0 || dense || skippedArt;
     const warnings = [];
     if (crowded) {
       warnings.push(

@@ -1,6 +1,8 @@
+!testdata/*.docx
+*.docx
+*.out
+*.test
+/verso
 node_modules/
 validator/bin/
 validator/obj/
-/verso
-*.docx
-!testdata/*.docx

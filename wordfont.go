@@ -84,21 +84,13 @@ func wordFit(s Span, family string, justified bool) (scale int, tracking float64
 	if t := strings.TrimRight(text, " "); justified && t != "" && t != text && s.Ink > 0 && s.Ink <= s.Width {
 		text, width = t, s.Ink
 	}
-	ems, n := 0.0, 0
-	for _, r := range text {
-		a := advance(advances, r)
-		if a == 0 {
-			return 0, 0, false
-		}
-		ems += float64(a) / 1000
-		n++
+	ems, n, ok := measure(advances, text)
+	if !ok || ems == 0 {
+		return 0, 0, false
 	}
 	source := width - float64(n-1)*s.Tracking
 	// Word sets the size in half points: a 6.81pt span is drawn at 7pt.
 	size := float64(halfPoints(s.Size)) / 2
-	if ems == 0 {
-		return 0, 0, false
-	}
 	ratio := source / (ems * size)
 	if ratio < 0.5 || ratio > 2 {
 		return 0, 0, false // not this text's real width (a stray box)
@@ -120,6 +112,27 @@ func wordFit(s Span, family string, justified bool) (scale int, tracking float64
 }
 
 func halfPoints(size float64) int { return max(1, int(math.Round(size*2))) }
+
+// measure is text's width in ems and its rune count, or not ok when the
+// advances lack one of its runes.
+func measure(advances []uint16, text string) (ems float64, n int, ok bool) {
+	for _, r := range text {
+		a := advance(advances, r)
+		if a == 0 {
+			return 0, 0, false
+		}
+		ems, n = ems+float64(a)/1000, n+1
+	}
+	return ems, n, true
+}
+
+// scale is a span's character scale in percent; 0 means none.
+func scale(s Span) float64 {
+	if s.Scale == 0 {
+		return 100
+	}
+	return float64(s.Scale)
+}
 func advance(advances []uint16, r rune) uint16 {
 	if fullWidth(r) {
 		return 1000 // a CJK font's ideographs, kana, Hangul and full-width forms
@@ -148,11 +161,7 @@ func fullWidth(r rune) bool {
 // spaceWidth is a space's width in the family and size Word lays s out in,
 // its character scale included.
 func spaceWidth(s Span) float64 {
-	scale := float64(s.Scale)
-	if scale == 0 {
-		scale = 100
-	}
-	return emsIn(s, " ") * float64(halfPoints(s.Size)) / 2 * scale / 100
+	return emsIn(s, " ") * float64(halfPoints(s.Size)) / 2 * scale(s) / 100
 }
 
 // naturalWidth is a span's width in Word with its source scale and tracking
@@ -162,19 +171,8 @@ func naturalWidth(s Span) (float64, bool) {
 	if !known {
 		return 0, false
 	}
-	scale := float64(s.Scale)
-	if scale == 0 {
-		scale = 100
-	}
-	ems, n := 0.0, 0
-	for _, r := range s.Text {
-		a := advance(advances, r)
-		if a == 0 {
-			return 0, false
-		}
-		ems, n = ems+float64(a)/1000, n+1
-	}
-	return ems*float64(halfPoints(s.Size))/2*scale/100 + float64(n-1)*s.Tracking, true
+	ems, n, ok := measure(advances, s.Text)
+	return ems*float64(halfPoints(s.Size))/2*scale(s)/100 + float64(n-1)*s.Tracking, ok
 }
 
 // face keys faceAdvances: the family and the span's bold and italic.
@@ -194,6 +192,7 @@ func face(family string, s Span) string {
 
 // measurable reports whether a face's width table covers every rune of text.
 func measurable(face, text string) bool {
-	advances, ok := faceAdvances[face]
-	return ok && !strings.ContainsFunc(text, func(r rune) bool { return advance(advances, r) == 0 })
+	advances, known := faceAdvances[face]
+	_, _, ok := measure(advances, text)
+	return known && ok
 }

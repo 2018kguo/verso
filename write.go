@@ -287,11 +287,11 @@ func isMarker(text string) bool {
 	return numberMarker.MatchString(text)
 }
 
-// gap is the source gap before span i of a line.
+// gap is the source gap between prev and the span s after it.
 func gap(prev, s Span) float64 { return s.X - (prev.X + prev.Width) }
 
 // tabbed reports whether span i follows a tab: a wide gap (a label and its
-// amount), or any visible gap after a list marker (a bullet and its text).
+// amount), or a gap over 0.6 em after a list marker (a bullet and its text).
 func tabbed(l Line, i int) bool {
 	prev, s := l.Spans[i-1], l.Spans[i]
 	g := gap(prev, s)
@@ -385,7 +385,7 @@ func (w *writer) frame(l Line, pageWidth float64) string {
 
 // Explicit defaults: without them Word applies widow/orphan control and
 // paragraph spacing of its own and moves source lines to other pages.
-const styles = declaration + `<w:styles xmlns:w="` + word + `"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:eastAsia="Arial" w:cs="Arial"/><w:sz w:val="20"/><w:szCs w:val="20"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:widowControl w:val="0"/><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="table" w:default="1" w:styleId="TableNormal"><w:name w:val="Normal Table"/><w:tblPr><w:tblCellMar><w:top w:w="0" w:type="dxa"/><w:left w:w="0" w:type="dxa"/><w:bottom w:w="0" w:type="dxa"/><w:right w:w="0" w:type="dxa"/></w:tblCellMar></w:tblPr></w:style></w:styles>`
+const styles = declaration + `<w:styles xmlns:w="` + word + `"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:eastAsia="Arial" w:cs="Arial"/><w:sz w:val="20"/><w:szCs w:val="20"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:widowControl w:val="0"/><w:autoSpaceDE w:val="0"/><w:autoSpaceDN w:val="0"/><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="table" w:default="1" w:styleId="TableNormal"><w:name w:val="Normal Table"/><w:tblPr><w:tblCellMar><w:top w:w="0" w:type="dxa"/><w:left w:w="0" w:type="dxa"/><w:bottom w:w="0" w:type="dxa"/><w:right w:w="0" w:type="dxa"/></w:tblCellMar></w:tblPr></w:style></w:styles>`
 
 // Word puts an exact-spaced line's baseline this share of the line's height
 // below its top, in every font and at every height (measured in Word for Mac
@@ -495,46 +495,68 @@ func (w *writer) gridRows(b *strings.Builder, rows [][]Line, edges []float64, to
 		}
 		return rows[r][0].Baseline - rows[r-1][0].Baseline
 	}
-	for r, row := range rows {
+	for r, line := range rows {
 		bottom := top
 		if r+1 < len(rows) {
 			bottom = rows[r+1][0].Baseline - baselineDepth(pitch(r+1))
 		}
 		var cells strings.Builder
-		for i, l := range row {
-			fmt.Fprintf(&cells, `<w:tc><w:tcPr><w:tcW w:w="%d" w:type="dxa"/></w:tcPr>`, twips(edges[i+1]-edges[i]))
+		for i, l := range line {
+			cell(&cells, edges[i+1]-edges[i])
 			for _, p := range paragraphs([]Line{l}, edges[i], edges[i+1]) {
 				p.Pitch = pitch(r)
 				bottom = math.Max(bottom, w.flow(&cells, p, edges[i], edges[i+1], top))
 			}
 			cells.WriteString(`</w:tc>`)
 		}
-		fmt.Fprintf(b, `<w:tr><w:trPr><w:cantSplit/><w:trHeight w:val="%d" w:hRule="exact"/></w:trPr>%s</w:tr>`, max(1, twips(bottom-top)), cells.String())
+		row(b, bottom-top, "exact")
+		b.WriteString(cells.String() + `</w:tr>`)
 		top = bottom
 	}
 	return top
 }
 
+// openTable starts a table whose columns run between edges, indented from
+// origin, through its grid.
+func openTable(b *strings.Builder, edges []float64, origin float64, borders string) {
+	fmt.Fprintf(b, `<w:tbl><w:tblPr><w:tblW w:w="%d" w:type="dxa"/><w:jc w:val="left"/><w:tblInd w:w="%d" w:type="dxa"/>%s%s</w:tblPr><w:tblGrid>`, twips(edges[len(edges)-1]-edges[0]), twips(edges[0]-origin), borders, tablePrefix)
+	for i := 1; i < len(edges); i++ {
+		fmt.Fprintf(b, `<w:gridCol w:w="%d"/>`, twips(edges[i]-edges[i-1]))
+	}
+	b.WriteString(`</w:tblGrid>`)
+}
+
+// row starts a row that does not split across pages; rule is how its
+// height holds ("exact" or "atLeast").
+func row(b *strings.Builder, height float64, rule string) {
+	fmt.Fprintf(b, `<w:tr><w:trPr><w:cantSplit/><w:trHeight w:val="%d" w:hRule="%s"/></w:trPr>`, max(1, twips(height)), rule)
+}
+
+// cell starts a plain cell of a width.
+func cell(b *strings.Builder, width float64) {
+	fmt.Fprintf(b, `<w:tc><w:tcPr><w:tcW w:w="%d" w:type="dxa"/></w:tcPr>`, twips(width))
+}
+
+// hairline is an empty paragraph one twip tall: a cell must end in one.
+const hairline = `<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="1" w:lineRule="exact"/></w:pPr></w:p>`
+
 // table writes a ruled table; origin is the left edge its indent counts
 // from (the page, or the layout cell holding it).
 func (w *writer) table(t Table, origin float64) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, `<w:tbl><w:tblPr><w:tblW w:w="%d" w:type="dxa"/><w:jc w:val="left"/><w:tblInd w:w="%d" w:type="dxa"/><w:tblBorders>`, twips(t.right()-t.X), twips(t.X-origin))
+	var b, borders strings.Builder
+	borders.WriteString(`<w:tblBorders>`)
 	for _, edge := range []string{"top", "left", "bottom", "right", "insideH", "insideV"} {
 		if edge == "left" && t.OpenLeft || edge == "right" && t.OpenRight {
-			fmt.Fprintf(&b, `<w:%s w:val="nil"/>`, edge)
+			fmt.Fprintf(&borders, `<w:%s w:val="nil"/>`, edge)
 			continue
 		}
-		fmt.Fprintf(&b, `<w:%s w:val="single" w:sz="4" w:color="000000"/>`, edge)
+		fmt.Fprintf(&borders, `<w:%s w:val="single" w:sz="4" w:color="000000"/>`, edge)
 	}
-	b.WriteString(`</w:tblBorders>` + tablePrefix + `</w:tblPr><w:tblGrid>`)
-	for i := 1; i < len(t.XS); i++ {
-		fmt.Fprintf(&b, `<w:gridCol w:w="%d"/>`, twips(t.XS[i]-t.XS[i-1]))
-	}
-	b.WriteString(`</w:tblGrid>`)
-	for r, row := range t.Rows {
-		fmt.Fprintf(&b, `<w:tr><w:trPr><w:cantSplit/><w:trHeight w:val="%d" w:hRule="exact"/></w:trPr>`, max(1, twips(t.YS[r+1]-t.YS[r])))
-		for _, cell := range row {
+	borders.WriteString(`</w:tblBorders>`)
+	openTable(&b, t.XS, origin, borders.String())
+	for r, cells := range t.Rows {
+		row(&b, t.YS[r+1]-t.YS[r], "exact")
+		for _, cell := range cells {
 			x := t.XS[cell.Start]
 			right := t.XS[cell.Start+cell.Columns]
 			fmt.Fprintf(&b, `<w:tc><w:tcPr><w:tcW w:w="%d" w:type="dxa"/>`, twips(right-x))
@@ -549,7 +571,7 @@ func (w *writer) table(t Table, origin float64) string {
 			b.WriteString(`</w:tcPr>`)
 			ll := baselineLines(cell.Spans)
 			if len(ll) == 0 {
-				b.WriteString(`<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="1" w:lineRule="exact"/></w:pPr></w:p>`)
+				b.WriteString(hairline)
 			}
 			cursor := t.YS[r]
 			if len(ll) > 0 {
@@ -583,23 +605,19 @@ func (w *writer) table(t Table, origin float64) string {
 func (w *writer) tables(b *strings.Builder, ts []*Table, top float64) float64 {
 	bottom, right := top, ts[len(ts)-1].right()
 	for _, t := range ts {
-		bottom = math.Max(bottom, t.YS[len(t.YS)-1])
+		bottom = math.Max(bottom, t.bottom())
 	}
-	fmt.Fprintf(b, `<w:tbl><w:tblPr><w:tblW w:w="%d" w:type="dxa"/><w:jc w:val="left"/><w:tblInd w:w="%d" w:type="dxa"/>%s</w:tblPr><w:tblGrid>`, twips(right-ts[0].X), twips(ts[0].X), tablePrefix)
 	edges := make([]float64, len(ts)+1)
 	for i, t := range ts {
 		edges[i] = t.X
 	}
 	edges[len(ts)] = right
-	for i := range ts {
-		fmt.Fprintf(b, `<w:gridCol w:w="%d"/>`, twips(edges[i+1]-edges[i]))
-	}
-	fmt.Fprintf(b, `</w:tblGrid><w:tr><w:trPr><w:cantSplit/><w:trHeight w:val="%d" w:hRule="exact"/></w:trPr>`, max(1, twips(bottom-top)))
+	openTable(b, edges, 0, "")
+	row(b, bottom-top, "exact")
 	for i, t := range ts {
-		fmt.Fprintf(b, `<w:tc><w:tcPr><w:tcW w:w="%d" w:type="dxa"/></w:tcPr>`, twips(edges[i+1]-edges[i]))
+		cell(b, edges[i+1]-edges[i])
 		spacer(b, top, t.Y)
-		b.WriteString(w.table(*t, t.X))
-		b.WriteString(`<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="1" w:lineRule="exact"/></w:pPr></w:p></w:tc>`)
+		b.WriteString(w.table(*t, t.X) + hairline + `</w:tc>`)
 	}
 	b.WriteString(`</w:tr></w:tbl>`)
 	return bottom
@@ -617,11 +635,7 @@ func (w *writer) columns(b *strings.Builder, cols []Block, top float64) float64 
 	for _, p := range last.Paragraphs {
 		edges[len(cols)] = math.Max(edges[len(cols)], p.Right)
 	}
-	fmt.Fprintf(b, `<w:tbl><w:tblPr><w:tblW w:w="%d" w:type="dxa"/><w:jc w:val="left"/><w:tblInd w:w="%d" w:type="dxa"/><w:tblBorders><w:top w:val="nil"/><w:left w:val="nil"/><w:bottom w:val="nil"/><w:right w:val="nil"/><w:insideH w:val="nil"/><w:insideV w:val="nil"/></w:tblBorders>%s</w:tblPr><w:tblGrid>`, twips(edges[len(cols)]-edges[0]), twips(edges[0]), tablePrefix)
-	for i := range cols {
-		fmt.Fprintf(b, `<w:gridCol w:w="%d"/>`, twips(edges[i+1]-edges[i]))
-	}
-	b.WriteString(`</w:tblGrid>`)
+	openTable(b, edges, 0, `<w:tblBorders><w:top w:val="nil"/><w:left w:val="nil"/><w:bottom w:val="nil"/><w:right w:val="nil"/><w:insideH w:val="nil"/><w:insideV w:val="nil"/></w:tblBorders>`)
 	if rows := grid(cols); rows != nil {
 		bottom := w.gridRows(b, rows, edges, top)
 		b.WriteString(`</w:tbl>`)
@@ -630,7 +644,7 @@ func (w *writer) columns(b *strings.Builder, cols []Block, top float64) float64 
 	var cells strings.Builder
 	bottom := top
 	for i, c := range cols {
-		fmt.Fprintf(&cells, `<w:tc><w:tcPr><w:tcW w:w="%d" w:type="dxa"/></w:tcPr>`, twips(edges[i+1]-edges[i]))
+		cell(&cells, edges[i+1]-edges[i])
 		cursor := top
 		for _, p := range c.Paragraphs {
 			cursor = w.flow(&cells, p, edges[i], edges[i+1], cursor)
@@ -638,7 +652,8 @@ func (w *writer) columns(b *strings.Builder, cols []Block, top float64) float64 
 		bottom = math.Max(bottom, cursor)
 		cells.WriteString(`</w:tc>`)
 	}
-	fmt.Fprintf(b, `<w:tr><w:trPr><w:cantSplit/><w:trHeight w:val="%d" w:hRule="atLeast"/></w:trPr>%s</w:tr></w:tbl>`, max(1, twips(bottom-top)), cells.String())
+	row(b, bottom-top, "atLeast")
+	b.WriteString(cells.String() + `</w:tr></w:tbl>`)
 	return bottom
 }
 
@@ -707,7 +722,7 @@ func write(ctx context.Context, dst io.Writer, pages []Page) (report Report, err
 			case it.Table != nil:
 				cursor = spacer(&w.body, cursor, it.Table.Y)
 				w.body.WriteString(w.table(*it.Table, 0))
-				cursor = it.Table.YS[len(it.Table.YS)-1]
+				cursor = it.Table.bottom()
 			case len(it.Tables) > 0:
 				cursor = spacer(&w.body, cursor, it.top())
 				cursor = w.tables(&w.body, it.Tables, cursor)

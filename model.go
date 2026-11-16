@@ -58,7 +58,8 @@ type Table struct {
 	OpenLeft, OpenRight bool // no rule on that side: the grid's rules run on past it
 }
 
-func (t Table) right() float64 { return t.XS[len(t.XS)-1] }
+func (t Table) right() float64  { return t.XS[len(t.XS)-1] }
+func (t Table) bottom() float64 { return t.YS[len(t.YS)-1] }
 
 // openSides adds an edge where a grid's top and bottom rules run on past
 // its outermost vertical rule: forms often leave the page-edge side open
@@ -424,8 +425,7 @@ func layout(p Page) (Layout, error) {
 	for i := range parent {
 		parent[i] = i
 	}
-	var root func(int) int
-	root = func(i int) int {
+	root := func(i int) int {
 		for parent[i] != i {
 			parent[i] = parent[parent[i]]
 			i = parent[i]
@@ -464,7 +464,7 @@ grids:
 		}
 		xs, ys := cluster(xx), cluster(yy)
 		var openLeft, openRight bool
-		if len(xs) >= 2 && len(ys) >= 2 {
+		if len(xs) >= 2 && len(ys) >= 3 {
 			xs, openLeft, openRight = openSides(g, xs, ys)
 		}
 		if len(xs) < 3 || len(ys) < 3 {

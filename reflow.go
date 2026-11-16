@@ -35,28 +35,14 @@ type Item struct {
 	Frames  []Line   // last resort: positioned line frames
 }
 
+// top is the highest of an item's side-by-side Tables or Columns.
 func (it Item) top() float64 {
-	switch {
-	case it.Block != nil:
-		return it.Block.Y
-	case it.Table != nil:
-		return it.Table.Y
-	case len(it.Tables) > 0:
-		y := it.Tables[0].Y
-		for _, t := range it.Tables {
-			y = math.Min(y, t.Y)
-		}
-		return y
-	case len(it.Columns) > 0:
-		y := it.Columns[0].Y
-		for _, c := range it.Columns {
-			y = math.Min(y, c.Y)
-		}
-		return y
-	}
 	y := math.Inf(1)
-	for _, l := range it.Frames {
-		y = math.Min(y, l.Y)
+	for _, t := range it.Tables {
+		y = math.Min(y, t.Y)
+	}
+	for _, c := range it.Columns {
+		y = math.Min(y, c.Y)
 	}
 	return y
 }
@@ -195,7 +181,7 @@ func blocks(pieces []Line, tables []Table) []*Block {
 	blocked := func(o *open, p Line) bool {
 		last := o.lines[len(o.lines)-1]
 		for _, t := range tables {
-			if t.Y > last.Baseline && t.Y < p.Y && t.X < math.Max(o.right, p.right()) && t.XS[len(t.XS)-1] > math.Min(o.left, p.X) {
+			if t.Y > last.Baseline && t.Y < p.Y && t.X < math.Max(o.right, p.right()) && t.right() > math.Min(o.left, p.X) {
 				return true
 			}
 		}
@@ -259,9 +245,6 @@ func median(v []float64) float64 {
 	return v[len(v)/2]
 }
 
-// paragraphs splits a column's lines where the source broke deliberately.
-// The main test is typesetting's own: if the next line's first word would
-// have fit at the end of this line, the break was a paragraph end.
 // itemRight is the right edge of a list item's widest line: its lines so
 // far and the lines after them that start at its hanging indent.
 func itemRight(current, next []Line, hang float64) float64 {
@@ -278,6 +261,9 @@ func itemRight(current, next []Line, hang float64) float64 {
 	return r
 }
 
+// paragraphs splits a column's lines where the source broke deliberately.
+// The main test is typesetting's own: if the next line's first word would
+// have fit at the end of this line, the break was a paragraph end.
 func paragraphs(lines []Line, left, right float64) []Paragraph {
 	gaps := make([]float64, len(lines)) // gaps[i]: baseline gap above line i
 	for i := 1; i < len(lines); i++ {
@@ -303,11 +289,7 @@ func paragraphs(lines []Line, left, right float64) []Paragraph {
 		}
 		return neighbours == 0 && gaps[i] > 1.6*size+tol
 	}
-	var all []float64
-	for _, g := range gaps[1:] {
-		all = append(all, g)
-	}
-	blockPitch := median(all)
+	blockPitch := median(gaps[1:])
 	// Justification stretches every line but a paragraph's last to the
 	// column edge, so in a justified column a short line that ends a sentence
 	// after lines that reach the edge ends its paragraph, even when the next
@@ -372,7 +354,7 @@ func paragraphs(lines []Line, left, right float64) []Paragraph {
 	// Two lines cannot show justification on their own; in a justified
 	// column, a first line that reaches the column edge was justified too.
 	for i, p := range result {
-		if justified && len(p.Lines) == 2 && p.Align == "left" && math.Abs(p.Lines[0].right()-right) <= 1.5 {
+		if justified && len(p.Lines) == 2 && p.Align == "left" && atEdge(p.Lines[0]) {
 			// Justified lines end at the column edge (as in shape).
 			result[i].Align, result[i].Right = "both", math.Max(p.Lines[0].right(), p.Lines[1].right())+0.25
 		}
@@ -384,20 +366,18 @@ func shape(ls []Line, left, right, blockPitch float64) Paragraph {
 	p := Paragraph{Lines: ls, Align: "left"}
 	n := len(ls)
 	size := ls[0].size()
-	if n > 1 {
-		p.Pitch = (ls[n-1].Baseline - ls[0].Baseline) / float64(n-1)
-	} else if blockPitch > size {
-		p.Pitch = math.Min(blockPitch, 1.5*size)
-	} else {
-		p.Pitch = 1.2 * size
-	}
 	if n == 1 {
+		p.Pitch = 1.2 * size
+		if blockPitch > size {
+			p.Pitch = math.Min(blockPitch, 1.5*size)
+		}
 		p.Pitch = math.Max(p.Pitch, ls[0].Height) // a guess: room for the glyph box
 		// One line never needs to wrap; give it room so Word's metrics cannot
 		// push its last word down, and keep its x as a plain indent.
 		p.Left, p.Right = ls[0].X, math.Max(right, ls[0].right())+2*size
 		return p
 	}
+	p.Pitch = (ls[n-1].Baseline - ls[0].Baseline) / float64(n-1)
 	lo, hi := math.Inf(1), math.Inf(-1)
 	for _, l := range ls[1:] {
 		lo, hi = math.Min(lo, l.X), math.Max(hi, l.X)
@@ -427,7 +407,7 @@ func shape(ls []Line, left, right, blockPitch float64) Paragraph {
 		p.Align = "both"
 	case chi-clo <= 2 && (spreadL > 3 || ls[0].X-lo > 3):
 		p.Align = "center"
-	case n >= 2 && rhi-rlo <= 1.5 && spreadL > 3:
+	case rhi-rlo <= 1.5 && spreadL > 3:
 		p.Align = "right"
 	}
 	p.Left, p.Right = lo, maxRight+slack
@@ -463,7 +443,7 @@ func bands(bs []*Block, tables []Table) []Item {
 	}
 	for i := range tables {
 		t := &tables[i]
-		ps = append(ps, bandPiece{t.Y, t.YS[len(t.YS)-1], nil, t})
+		ps = append(ps, bandPiece{t.Y, t.bottom(), nil, t})
 	}
 	sort.SliceStable(ps, func(i, j int) bool { return ps[i].top < ps[j].top })
 	var items []Item
@@ -513,6 +493,9 @@ func band(group []bandPiece) []Item {
 			for _, para := range b.Paragraphs {
 				ls = append(ls, para.Lines...)
 			}
+		}
+		if len(ls) == 0 {
+			return items
 		}
 		return append(items, Item{Frames: ls})
 	}

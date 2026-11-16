@@ -95,27 +95,45 @@ func Extract(ctx context.Context, path string, opts Options) ([]Page, error) {
 	limited := &io.LimitedReader{R: stdout, N: (256 << 20) + 1}
 	scanner := bufio.NewScanner(limited)
 	scanner.Buffer(make([]byte, 64<<10), 16<<20)
+	// Lines are read while earlier ones decode: the decoder blocks on a full
+	// pipe, and reading only between decodes serialized the two (a third of
+	// a 166-page label's time).
+	lines := make(chan []byte, 4)
+	var scanErr error
+	go func() {
+		defer close(lines)
+		for scanner.Scan() {
+			lines <- bytes.Clone(scanner.Bytes())
+		}
+		scanErr = scanner.Err()
+	}()
 	var pages []Page
 	var decodeErr error
-	for scanner.Scan() {
+	for line := range lines {
+		if decodeErr != nil {
+			continue // drain: cancel() below stops the decoder
+		}
 		if len(pages) >= opts.MaxPages {
 			decodeErr = errors.New("page limit")
-			break
+			cancel()
+			continue
 		}
 		var p Page
-		if err = json.Unmarshal(scanner.Bytes(), &p); err != nil {
+		if err := json.Unmarshal(line, &p); err != nil {
 			decodeErr = fmt.Errorf("invalid decoder response: %w", err)
-			break
+			cancel()
+			continue
 		}
 		p.Warnings = append(p.Warnings, p.sanitize()...)
-		if err = p.validate(); err != nil {
+		if err := p.validate(); err != nil {
 			decodeErr = err
-			break
+			cancel()
+			continue
 		}
 		pages = append(pages, p)
 	}
 	if decodeErr == nil {
-		decodeErr = scanner.Err()
+		decodeErr = scanErr
 	}
 	if limited.N == 0 {
 		decodeErr = errors.New("decoder output exceeds 256 MiB limit")

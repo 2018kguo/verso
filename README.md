@@ -31,7 +31,7 @@ from the source means text flowed onto the wrong pages.
 | | verso | pdf2docx 0.5.13 | LibreOffice 26.2 |
 |---|---|---|---|
 | Physics paper, 17 pp | **valid**, Ink F1 **0.987** | invalid, 0.631, 18 pp | invalid, 0.686 |
-| Japanese Wikipedia, 14 pp | **valid**, **0.940** | invalid, 0.747, 15 pp | invalid, 0.490 |
+| Japanese Wikipedia, 14 pp | **valid**, **0.947** | invalid, 0.747, 15 pp | invalid, 0.490 |
 | H.R. 82 bill, 3 pp | **valid**, **0.968** | invalid, 0.957 | invalid, 0.518 |
 | NIST FIPS 197 (AES), 46 pp | **valid**, **0.974** | invalid, 0.363, 54 pp | invalid, 0.407 |
 | IRS Form W-4, 4 pp | **valid**, **0.972** | invalid, 0.956 | invalid, 0.703 |

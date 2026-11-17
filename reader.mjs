@@ -9,7 +9,7 @@ const doc = await openPdf(new Uint8Array(fs.readFileSync(file))).catch(
   (error) => {
     process.stderr.write(`${error?.message ?? error}\n`); // e.g. needs a password
     process.exit(1);
-  },
+  }
 );
 const say = (value) => {
   fs.writeSync(1, JSON.stringify(value)); // not concatenated: pages run to megabytes
@@ -163,11 +163,11 @@ function hidden(pdf, pageIndex, info, text, images) {
     const y0 = Math.max(0, Math.floor(text.boxes[4 * i + 1] * sy));
     const x1 = Math.min(
       shown.width,
-      Math.ceil((text.boxes[4 * i] + text.boxes[4 * i + 2]) * sx),
+      Math.ceil((text.boxes[4 * i] + text.boxes[4 * i + 2]) * sx)
     );
     const y1 = Math.min(
       shown.height,
-      Math.ceil((text.boxes[4 * i + 1] + text.boxes[4 * i + 3]) * sy),
+      Math.ceil((text.boxes[4 * i + 1] + text.boxes[4 * i + 3]) * sy)
     );
     let same = true;
     for (let y = y0; same && y < y1; y++) {
@@ -323,7 +323,7 @@ try {
     const tilted = (angle) => {
       const a = Math.atan2(
         Math.sin(angle - rotation),
-        Math.cos(angle - rotation),
+        Math.cos(angle - rotation)
       );
       return Math.abs(a) > 0.01;
     };
@@ -348,10 +348,30 @@ try {
     let droppedLinks = 0;
     let last;
     const ocr = hidden(doc, pageIndex, info, text, objects.images);
+    const drawnAt = new Map(); // char:baseline:0.6pt cell -> x of the glyph kept
+    // Right-to-left text needs Word's bidi layout, which a page of it gets by
+    // review, not conversion; a few words of it in a left-to-right page (a
+    // name in Arabic in a Georgian article) keep their look as images.
+    const bidi = (c) =>
+      (c >= 0x5_90 && c <= 0x8_ff) ||
+      (c >= 0x20_2a && c <= 0x20_2e) ||
+      (c >= 0x20_66 && c <= 0x20_69);
+    let ink = 0;
+    let rtl = 0;
+    for (let i = 0; i < text.count; i++) {
+      ink += text.codepoints[i] > 32 ? 1 : 0;
+      rtl += bidi(text.codepoints[i]) ? 1 : 0;
+    }
+    if (!ocr && rtl > 0.1 * ink) {
+      throw new Error(
+        `page ${pageIndex + 1}: bidirectional text needs manual review`
+      );
+    }
     for (let i = 0; i < (ocr ? 0 : text.count); i++) {
       const tilt = tilted(text.angles[i]);
       if (
         text.flags[i] & 2 ||
+        bidi(text.codepoints[i]) ||
         text.codepoints[i] === 0xff_fd ||
         pictures[text.fontIds[i]] ||
         (tilt && !level(text, i))
@@ -373,11 +393,6 @@ try {
       } else if (unsafe(text.codepoints[i])) {
         continue;
       }
-      if (/[\u0590-\u08ff\u202a-\u202e\u2066-\u2069]/u.test(value)) {
-        throw new Error(
-          `page ${pageIndex + 1}: bidirectional text needs manual review`,
-        );
-      }
       if (value === "\n" || value === "\r") {
         last = undefined;
         continue;
@@ -390,6 +405,21 @@ try {
       let width = boxWidth;
       if (!value.trim() && (!last || width <= 0)) {
         continue;
+      }
+      // A glyph drawn again where it already is (text split into pieces
+      // that overlap, faux bold drawn twice) is one glyph: Word wrote it
+      // twice ("archite ectural", "thhesis").
+      if (value.trim()) {
+        // Kept glyphs are 0.6pt apart, so a 0.6pt cell holds at most one:
+        // three lookups, however many of this character share the line.
+        const line = `${value}:${Math.round(y)}:`;
+        const cell = Math.floor(boxX / 0.6);
+        const near = (c) =>
+          Math.abs((drawnAt.get(line + c) ?? Infinity) - boxX) < 0.6;
+        if (near(cell - 1) || near(cell) || near(cell + 1)) {
+          continue;
+        }
+        drawnAt.set(line + cell, boxX);
       }
       const run = text.runIds[i];
       // A nonspacing mark (a Thai tone mark, a Devanagari vowel sign above)
@@ -438,7 +468,7 @@ try {
             x + width / 2 >= box.x &&
             x + width / 2 <= box.x + box.width &&
             y + height / 2 >= box.y &&
-            y + height / 2 <= box.y + box.height,
+            y + height / 2 <= box.y + box.height
         )?.target;
       let link = "";
       if (target?.kind === "uri") {
@@ -575,7 +605,7 @@ try {
     for (let i = 0; i < pathCount; i++) {
       const [, , pathWidth, pathHeight] = objects.paths.boxes.subarray(
         i * 4,
-        i * 4 + 4,
+        i * 4 + 4
       );
       // Filled backgrounds are not table borders. Thin filled rectangles are.
       if (
@@ -598,7 +628,7 @@ try {
       };
       for (let j = begin; j < end; j++) {
         const point = Array.from(
-          objects.segments.points.subarray(2 * j, 2 * j + 2),
+          objects.segments.points.subarray(2 * j, 2 * j + 2)
         );
         const kind = objects.segments.kinds[j];
         if ((kind & 3) === 2) {
@@ -623,7 +653,7 @@ try {
     for (let i = 0; i < objects.images.count; i++) {
       const [x, y, width, height] = objects.images.boxes.subarray(
         4 * i,
-        4 * i + 4,
+        4 * i + 4
       );
       if (width > 0 && height > 0) {
         placed.push({ x, y, width, height });
@@ -642,7 +672,7 @@ try {
             x >= k.x - 1 &&
             y >= k.y - 1 &&
             x + width <= k.x + k.width + 1 &&
-            y + height <= k.y + k.height + 1,
+            y + height <= k.y + k.height + 1
         )
       ) {
         continue;
@@ -655,19 +685,45 @@ try {
     // cells, panels). Thin art under text is left out: ruled tables and
     // underlines are rebuilt in Word from their segments.
     // A page fill, or a panel behind all of the page's text, is background
-    // (usually white), not art.
+    // (usually white), not art: unless light text stands on no smaller fill,
+    // which only a dark page fill shows (white on a navy cover came out white
+    // on white). White text in a shaded header cell has its cell.
+    const panels = [];
+    for (let i = 0; i < pathCount; i++) {
+      const [x, y, w, h] = objects.paths.boxes.subarray(4 * i, 4 * i + 4);
+      if (
+        objects.paths.flags[i] & 1 &&
+        w * h < 0.5 * info.width * info.height
+      ) {
+        panels.push({ x, y, w, h });
+      }
+    }
+    const light = spans.some((s) => {
+      const c = Number.parseInt(s.color, 16);
+      const cx = s.x + s.width / 2;
+      const cy = s.y + s.height / 2;
+      return (
+        s.text.trim() &&
+        0.299 * (c >> 16) + 0.587 * ((c >> 8) & 255) + 0.114 * (c & 255) >
+          200 &&
+        !panels.some(
+          (b) => cx >= b.x && cx <= b.x + b.w && cy >= b.y && cy <= b.y + b.h
+        )
+      );
+    });
     const backdrop = (b) =>
-      (b.width >= info.width * 0.98 && b.height >= info.height * 0.98) ||
-      (b.width * b.height >= info.width * info.height * 0.5 &&
-        spans.some((s) => s.text.trim()) &&
-        spans.every(
-          (s) =>
-            !s.text.trim() ||
-            (s.x >= b.x - 1 &&
-              s.y >= b.y - 1 &&
-              s.x + s.width <= b.x + b.width + 1 &&
-              s.y + s.height <= b.y + b.height + 1),
-        ));
+      !light &&
+      ((b.width >= info.width * 0.98 && b.height >= info.height * 0.98) ||
+        (b.width * b.height >= info.width * info.height * 0.5 &&
+          spans.some((s) => s.text.trim()) &&
+          spans.every(
+            (s) =>
+              !s.text.trim() ||
+              (s.x >= b.x - 1 &&
+                s.y >= b.y - 1 &&
+                s.x + s.width <= b.x + b.width + 1 &&
+                s.y + s.height <= b.y + b.height + 1)
+          )));
     let dense = false;
     const boxes = Array.from({ length: pathCount }, (_, i) => {
       const [x0, y0, w0, h0] = objects.paths.boxes.subarray(4 * i, 4 * i + 4);
@@ -720,7 +776,7 @@ try {
         (s) =>
           s.text.trim() &&
           Math.min(s.x + s.width, b.x + b.width) > Math.max(s.x, b.x) &&
-          Math.min(s.y + s.height, b.y + b.height) > Math.max(s.y, b.y),
+          Math.min(s.y + s.height, b.y + b.height) > Math.max(s.y, b.y)
       );
     let skippedArt = false;
     const drawn = (list) => list.filter((b) => b.thick || !underText(b));
@@ -753,22 +809,22 @@ try {
     const warnings = [];
     if (crowded) {
       warnings.push(
-        "Page too complex to keep every image and drawing: the smallest were left out",
+        "Page too complex to keep every image and drawing: the smallest were left out"
       );
     }
     if (raster.length) {
       warnings.push(
-        `${raster.length} rotated or unmapped characters kept as images, not editable text`,
+        `${raster.length} rotated or unmapped characters kept as images, not editable text`
       );
     }
     if (droppedLinks) {
       warnings.push(
-        "Links other than web, mail and page links keep their text without the link",
+        "Links other than web, mail and page links keep their text without the link"
       );
     }
     if (
       spans.some((s) =>
-        /[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/u.test(s.text),
+        /[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/u.test(s.text)
       )
     ) {
       warnings.push("CJK text and font fidelity require manual review");
@@ -777,14 +833,14 @@ try {
     // its look as an image: without the page's text, unless the appearance
     // draws text of its own.
     const shown = annotations.filter(
-      (a) => a.subtype !== 2 && a.appearanceObjects > 0,
+      (a) => a.subtype !== 2 && a.appearanceObjects > 0
     );
     for (const a of shown.slice(0, Math.max(0, 100 - images.length))) {
       addImage(a.box, a.appearanceTextObjects > 0);
     }
     if (annotations.some((a) => a.subtype !== 2)) {
       warnings.push(
-        "PDF annotations and form fields are kept as images, not Word comments or fields",
+        "PDF annotations and form fields are kept as images, not Word comments or fields"
       );
     }
     if (
@@ -800,11 +856,11 @@ try {
       addImage({ x: 0, y: 0, width: info.width, height: info.height });
       if (ocr) {
         warnings.push(
-          "Scanned page kept as an image: its hidden OCR text is not editable text",
+          "Scanned page kept as an image: its hidden OCR text is not editable text"
         );
       } else {
         warnings.push(
-          "Scanned page kept as an image: no editable text without OCR",
+          "Scanned page kept as an image: no editable text without OCR"
         );
         scans++;
       }

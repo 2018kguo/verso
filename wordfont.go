@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-//go:generate go run gen_metrics.go /Applications/LibreOffice.app/Contents/Resources/fonts/truetype "/Applications/Microsoft Word.app/Contents/Resources/DFonts"
+//go:generate go run gen_metrics.go /Applications/LibreOffice.app/Contents/Resources/fonts/truetype "/Applications/Microsoft Word.app/Contents/Resources/DFonts" /System/Library/Fonts/Supplemental
 
 // officeFonts are families Word ships or Office installs: Word lays them out
 // itself. Others are not on the reader's machine, so Word would substitute a
@@ -134,7 +134,14 @@ func wordFit(s Span, family string, justified bool) (scale int, tracking float64
 	// Word sets the size in half points: a 6.81pt span is drawn at 7pt.
 	size := float64(halfPoints(s.Size)) / 2
 	ratio := source / (ems * size)
-	if ratio < 0.5 || ratio > 2 {
+	// Full-width punctuation set half width ("，" in a proportional CJK
+	// face) is exactly half its em, a rounding below the stray-box floor:
+	// left full width, every comma pushed a Chinese line long.
+	floor := 0.5
+	if !strings.ContainsFunc(text, func(r rune) bool { return !fullWidth(r) }) {
+		floor = 0.4
+	}
+	if ratio < floor || ratio > 2 {
 		return 0, 0, false // not this text's real width (a stray box)
 	}
 	scale = 100

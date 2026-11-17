@@ -3,9 +3,10 @@
 // gen_metrics writes metrics_gen.go: advance widths, in thousandths of an em,
 // of the Office fonts Word lays text out in, read from their metric-compatible
 // OFL twins (Liberation, Carlito, Caladea; LibreOffice ships them) and, for
-// Verdana, which has none, from the copy Word ships.
+// families with none, from the copies Word (or macOS) ships. Only advances
+// are kept, no outlines.
 //
-//	go run gen_metrics.go /Applications/LibreOffice.app/Contents/Resources/fonts/truetype "/Applications/Microsoft Word.app/Contents/Resources/DFonts"
+//	go run gen_metrics.go /Applications/LibreOffice.app/Contents/Resources/fonts/truetype "/Applications/Microsoft Word.app/Contents/Resources/DFonts" /System/Library/Fonts/Supplemental
 package main
 
 import (
@@ -29,6 +30,30 @@ var faces = []struct{ family, file string }{
 	{"Calibri", "Carlito-Regular"}, {"Calibri|b", "Carlito-Bold"}, {"Calibri|i", "Carlito-Italic"}, {"Calibri|bi", "Carlito-BoldItalic"},
 	{"Cambria", "Caladea-Regular"}, {"Cambria|b", "Caladea-Bold"}, {"Cambria|i", "Caladea-Italic"}, {"Cambria|bi", "Caladea-BoldItalic"},
 	{"Verdana", "Verdana"}, {"Verdana|b", "Verdana Bold"}, {"Verdana|i", "Verdana Italic"}, {"Verdana|bi", "Verdana Bold Italic"},
+	// Word's own families (from its DFonts, or macOS's copies of Georgia and
+	// Trebuchet MS): without their widths no span in them was fitted, and a
+	// Corbel table of contents wrapped its page numbers. A style Word
+	// synthesizes (Tahoma italic) takes the face it slants or thickens.
+	{"Corbel", "Corbel"}, {"Corbel|b", "Corbelb"}, {"Corbel|i", "Corbeli"}, {"Corbel|bi", "Corbelz"},
+	{"Candara", "Candara"}, {"Candara|b", "Candarab"}, {"Candara|i", "Candarai"}, {"Candara|bi", "Candaraz"},
+	{"Constantia", "Constan"}, {"Constantia|b", "Constanb"}, {"Constantia|i", "Constani"}, {"Constantia|bi", "Constanz"},
+	{"Consolas", "Consola"}, {"Consolas|b", "Consolab"}, {"Consolas|i", "Consolai"}, {"Consolas|bi", "Consolaz"},
+	{"Garamond", "GARA"}, {"Garamond|b", "GARABD"}, {"Garamond|i", "GARAIT"}, {"Garamond|bi", "GARABDIT"},
+	{"Century Gothic", "Century Gothic"}, {"Century Gothic|b", "Century Gothic Bold"}, {"Century Gothic|i", "Century Gothic Italic"}, {"Century Gothic|bi", "Century Gothic Bold Italic"},
+	{"Century Schoolbook", "Century Schoolbook"}, {"Century Schoolbook|b", "Century Schoolbook Bold"}, {"Century Schoolbook|i", "Century Schoolbook Italic"}, {"Century Schoolbook|bi", "Century Schoolbook Bold Italic"},
+	{"Book Antiqua", "Book Antiqua"}, {"Book Antiqua|b", "Book Antiqua Bold"}, {"Book Antiqua|i", "Book Antiqua Italic"}, {"Book Antiqua|bi", "Book Antiqua Bold Italic"},
+	{"Bookman Old Style", "Bookman Old Style"}, {"Bookman Old Style|b", "Bookman Old Style Bold"}, {"Bookman Old Style|i", "Bookman Old Style Italic"}, {"Bookman Old Style|bi", "Bookman Old Style Bold Italic"},
+	{"Palatino Linotype", "pala"}, {"Palatino Linotype|b", "palab"}, {"Palatino Linotype|i", "palai"}, {"Palatino Linotype|bi", "palabi"},
+	{"Gill Sans MT", "Gill Sans MT"}, {"Gill Sans MT|b", "Gill Sans MT Bold"}, {"Gill Sans MT|i", "Gill Sans MT Italic"}, {"Gill Sans MT|bi", "Gill Sans MT Bold Italic"},
+	{"Aptos", "Aptos"}, {"Aptos|b", "Aptos-Bold"}, {"Aptos|i", "Aptos-Italic"}, {"Aptos|bi", "Aptos-Bold-Italic"},
+	{"Calibri Light", "calibril"}, {"Calibri Light|b", "calibril"}, {"Calibri Light|i", "calibrili"}, {"Calibri Light|bi", "calibrili"},
+	{"Georgia", "Georgia"}, {"Georgia|b", "Georgia Bold"}, {"Georgia|i", "Georgia Italic"}, {"Georgia|bi", "Georgia Bold Italic"},
+	{"Trebuchet MS", "Trebuchet MS"}, {"Trebuchet MS|b", "Trebuchet MS Bold"}, {"Trebuchet MS|i", "Trebuchet MS Italic"}, {"Trebuchet MS|bi", "Trebuchet MS Bold Italic"},
+	{"Tahoma", "tahoma"}, {"Tahoma|b", "tahomabd"}, {"Tahoma|i", "tahoma"}, {"Tahoma|bi", "tahomabd"},
+	{"Franklin Gothic Book", "Franklin Gothic Book"}, {"Franklin Gothic Book|b", "Franklin Gothic Book"}, {"Franklin Gothic Book|i", "Franklin Gothic Book Italic"}, {"Franklin Gothic Book|bi", "Franklin Gothic Book Italic"},
+	{"Lucida Console", "Lucida Console"}, {"Lucida Console|b", "Lucida Console"}, {"Lucida Console|i", "Lucida Console"}, {"Lucida Console|bi", "Lucida Console"},
+	{"Lucida Sans Unicode", "Lucida Sans Unicode"}, {"Lucida Sans Unicode|b", "Lucida Sans Unicode"}, {"Lucida Sans Unicode|i", "Lucida Sans Unicode"}, {"Lucida Sans Unicode|bi", "Lucida Sans Unicode"},
+	{"Arial Black", "ariblk"}, {"Arial Black|b", "ariblk"}, {"Arial Black|i", "ariblk"}, {"Arial Black|bi", "ariblk"},
 }
 
 func main() {

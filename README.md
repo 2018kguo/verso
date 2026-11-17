@@ -4,7 +4,7 @@ Convert a PDF into a Word document you can edit, redline and send back, and
 that Microsoft's own validator accepts.
 
 ```sh
-npm install -g @2018kguo/recto@0.9.0  # PDF engine (WebAssembly, no native deps); Node 24+
+npm install -g @2018kguo/recto@0.10.0  # PDF engine (WebAssembly, no native deps); Node 24+
 go install github.com/2018kguo/verso/cmd/verso@latest
 verso report.pdf report.docx          # prints a JSON report; exits 1 if it refuses
 ```

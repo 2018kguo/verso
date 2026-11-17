@@ -360,11 +360,14 @@ func underlines(spans []Span, s Segment) bool {
 	return true
 }
 
+// cluster merges rule positions within 4pt: a double rule (two lines 2.85pt
+// apart) is one edge, not a strip of a row no text fits in, which Word drew
+// taller and ran a form's table onto a new page.
 func cluster(values []float64) []float64 {
 	sort.Float64s(values)
 	var out []float64
 	for _, v := range values {
-		if len(out) == 0 || v-out[len(out)-1] > 2.0 {
+		if len(out) == 0 || v-out[len(out)-1] > 4.0 {
 			out = append(out, v)
 		}
 	}

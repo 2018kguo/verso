@@ -788,7 +788,7 @@ func TestFindRectoIgnoresWorkingDirectory(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(planted, "dist"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	os.WriteFile(filepath.Join(planted, "package.json"), []byte(`{"name":"@2018kguo/recto","version":"0.9.0"}`), 0o600)
+	os.WriteFile(filepath.Join(planted, "package.json"), []byte(`{"name":"@2018kguo/recto","version":"0.10.0"}`), 0o600)
 	os.WriteFile(filepath.Join(planted, "dist", "index.js"), []byte(`throw new Error("planted")`), 0o600)
 	t.Chdir(dir)
 	t.Setenv("VERSO_RECTO_MODULE", "")
@@ -1470,10 +1470,10 @@ func TestNearWidthsTrackToSourceWidth(t *testing.T) {
 	}
 }
 
-// The fits are measured against Recto 0.9's text spacing: any 0.9 release,
+// The fits are measured against Recto 0.10's text spacing: any 0.10 release,
 // nothing older or newer.
 func TestRectoVersion(t *testing.T) {
-	for v, ok := range map[string]bool{"0.8.2": false, "0.9.0": true, "0.9.12": true, "0.9.1-rc.1": true, "0.10.0": false, "1.9.0": false} {
+	for v, ok := range map[string]bool{"0.9.0": false, "0.10.0": true, "0.10.12": true, "0.10.1-rc.1": true, "0.1.0": false, "0.11.0": false, "1.10.0": false} {
 		if rectoVersion.MatchString(v) != ok {
 			t.Errorf("%s: accepted %v, want %v", v, !ok, ok)
 		}
@@ -1874,14 +1874,14 @@ func TestCellShortLinesStayApart(t *testing.T) {
 	}
 }
 
-// A gap drawn between word spans in a face no table measures (Georgia) keeps
+// A gap drawn between word spans in a face no table measures (Segoe UI) keeps
 // Word's own space: measured against a guessed 0.5em it was tracked to nothing
 // and the words touched.
 func TestUnmeasuredFaceGapKeepsWordsApart(t *testing.T) {
 	hello, world := span("Hello", 72, 100, 26), span("world", 100.75, 100, 28)
-	hello.Font, world.Font = "Georgia", "Georgia"
+	hello.Font, world.Font = "SegoeUI", "SegoeUI"
 	if m := regexp.MustCompile(`<w:spacing w:val="-\d+"/>`).FindString(written(t, []Page{{Width: 612, Height: 792, Spans: []Span{hello, world}}})["word/document.xml"]); m != "" {
-		t.Fatalf("Georgia gap tracked narrower: %s", m)
+		t.Fatalf("Segoe UI gap tracked narrower: %s", m)
 	}
 }
 
@@ -2230,5 +2230,93 @@ func TestOneColumnRuledRowsAreATable(t *testing.T) {
 	box := []Segment{segs[0], segs[3], segs[4], segs[5]}
 	if doc := written(t, []Page{{Width: 612, Height: 792, Spans: spans[:1], Segments: box}})["word/document.xml"]; strings.Contains(doc, "<w:tbl>") {
 		t.Fatalf("a lone box became a table: %s", doc)
+	}
+}
+
+// A few right-to-left letters in a left-to-right page (a name in Arabic in a
+// Georgian article) keep their look as images; the document was refused. A
+// page that is mostly right-to-left still is.
+func TestFewRightToLeftLettersAreImages(t *testing.T) {
+	opts := integrationOptions(t)
+	glyph := "600 0 0 0 600 700 d1 0 0 600 700 re f\n"
+	cmap := "/CIDInit /ProcSet findresource begin 12 dict begin begincmap /CMapName /HA def 1 begincodespacerange <00> <FF> endcodespacerange 2 beginbfchar <48> <0048> <41> <05D0> endbfchar endcmap CMapName currentdict /CMap defineresource pop end end\n"
+	convert := func(shown string) ([]Page, error) {
+		input := filepath.Join(t.TempDir(), "rtl.pdf")
+		content := "BT /F1 14 Tf 72 700 Td (" + shown + ") Tj ET\n"
+		writePDF(t, input, []string{
+			"<< /Type /Catalog /Pages 2 0 R >>",
+			"<< /Type /Pages /Count 1 /Kids [3 0 R] >>",
+			"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+			"<< /Type /Font /Subtype /Type3 /FontBBox [0 0 600 700] /FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << /H 6 0 R /A 6 0 R >> /Encoding << /Type /Encoding /Differences [65 /A 72 /H] >> /FirstChar 65 /LastChar 72 /Widths [600 0 0 0 0 0 0 600] /ToUnicode 7 0 R >>",
+			fmt.Sprintf("<< /Length %d >>\nstream\n%sendstream", len(content), content),
+			fmt.Sprintf("<< /Length %d >>\nstream\n%sendstream", len(glyph), glyph),
+			fmt.Sprintf("<< /Length %d >>\nstream\n%sendstream", len(cmap), cmap),
+		})
+		return Extract(context.Background(), input, opts)
+	}
+	pages, err := convert(strings.Repeat("H", 30) + "A")
+	if err != nil || len(pages[0].Images) == 0 || strings.ContainsRune(pages[0].Spans[0].Text, 'א') {
+		t.Fatalf("%v %+v: want the letter kept as an image", err, pages)
+	}
+	if _, err := convert("HAAA"); err == nil || !strings.Contains(err.Error(), "bidirectional") {
+		t.Fatalf("a right-to-left page converted: %v", err)
+	}
+}
+
+// Full-width punctuation the source sets half width ("，" at 0.5 em in a
+// proportional CJK face) is fitted to it: left full width, every comma pushed
+// a Chinese line long.
+func TestHalfWidthCJKPunctuationIsFitted(t *testing.T) {
+	s := span("，", 72, 100, 5.9)
+	s.Size, s.Font = 11.8, "FZSSK--GBK1-0"
+	scale, tracking, ok := wordFit(s, wordFamily(s), false)
+	if !ok || float64(scale)/100*12+tracking > 6.5 {
+		t.Fatalf("scale %d tracking %.2f ok %v: want about half an em", scale, tracking, ok)
+	}
+}
+
+// A double rule (two lines 2.85pt apart) is one row edge, not a strip of a
+// row no text fits in: Word drew ten such strips taller and ran a form's
+// table onto a new page.
+func TestDoubleRulesAreOneEdge(t *testing.T) {
+	var segs []Segment
+	for _, y := range []float64{100, 102.85, 120, 122.85, 140, 142.85, 160} {
+		segs = append(segs, Segment{X1: 72, Y1: y, X2: 540, Y2: y})
+	}
+	for _, x := range []float64{72, 300, 540} {
+		segs = append(segs, Segment{X1: x, Y1: 100, X2: x, Y2: 160})
+	}
+	spans := []Span{span("Product", 80, 114, 40), span("Lot", 310, 114, 20), span("Dose", 80, 136, 30)}
+	doc := written(t, []Page{{Width: 612, Height: 792, Spans: spans, Segments: segs}})["word/document.xml"]
+	if n := strings.Count(doc, "<w:trHeight"); n != 3 {
+		t.Fatalf("%d rows, want 3: %s", n, doc)
+	}
+}
+
+// Distinct glyphs of one character on one baseline (0.7pt apart, just past
+// the 0.6pt duplicate distance) are all kept, each checked against its
+// neighbours only, not every earlier one.
+func TestRepeatedCharacterOnALineIsKept(t *testing.T) {
+	opts := integrationOptions(t)
+	input := filepath.Join(t.TempDir(), "row.pdf")
+	row := strings.Repeat("i", 600)
+	content := fmt.Sprintf("BT /F1 1 Tf 0.478 Tc 20 700 Td (%s) Tj ET\nBT /F1 12 Tf 72 600 Td (Body) Tj ET\n", row)
+	writePDF(t, input, []string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Count 1 /Kids [3 0 R] >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+		"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+		fmt.Sprintf("<< /Length %d >>\nstream\n%sendstream", len(content), content),
+	})
+	pages, err := Extract(context.Background(), input, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, s := range pages[0].Spans {
+		n += strings.Count(s.Text, "i")
+	}
+	if n != 600 {
+		t.Fatalf("%d of 600 kept", n)
 	}
 }

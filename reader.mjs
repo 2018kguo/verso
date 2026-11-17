@@ -148,6 +148,10 @@ function weight(font) {
   return Math.max(font?.weight ?? 400, named);
 }
 
+// four reads four numbers from a typed array as a plain array: a subarray
+// view destructured per glyph was a tenth of a page's reading.
+const four = (a, at) => [a[at], a[at + 1], a[at + 2], a[at + 3]];
+
 // hidden reports whether a page's text is an OCR layer it does not show
 // (rendering mode 3, or painted over by its scan): Word drew it over the scan,
 // doubled, and the extra text ran onto pages of its own. A glyph is hidden
@@ -165,7 +169,7 @@ function hidden(pdf, pageIndex, info, text, images) {
   const at = (v, n) => Math.min(n - 2, Math.max(0, Math.floor(v / cell)));
   let big = false;
   for (let i = 0; i < images.count; i++) {
-    const [x, y, w, h] = images.boxes.subarray(4 * i, 4 * i + 4);
+    const [x, y, w, h] = four(images.boxes, 4 * i);
     if (w * h > 0.25 * info.width * info.height) {
       big = true;
       const [c0, c1] = [at(x, cols), at(x + w, cols) + 1];
@@ -470,7 +474,7 @@ function build(doc, pageIndex) {
       pictures[text.fontIds[i]] ||
       (tilt && !level(text, i))
     ) {
-      const [x, y, width, height] = text.boxes.subarray(4 * i, 4 * i + 4);
+      const [x, y, width, height] = four(text.boxes, 4 * i);
       // Clipped first: a glyph box miles off the page would span millions
       // of cluster grid cells.
       const box = clip(info, { x, y, width, height });
@@ -494,7 +498,7 @@ function build(doc, pageIndex) {
     if (text.flags[i] & 1) {
       continue;
     }
-    const [boxX, y, boxWidth, height] = text.boxes.subarray(4 * i, 4 * i + 4);
+    const [boxX, y, boxWidth, height] = four(text.boxes, 4 * i);
     let x = boxX;
     let width = boxWidth;
     if (!value.trim() && (!last || width <= 0)) {
@@ -547,7 +551,7 @@ function build(doc, pageIndex) {
       // A slant drawn with the text matrix (faux italic) widens each box
       // by its height times the shear; the advance is the box less that.
       // Up in text space is (c, d) in the viewer frame, where up is -y.
-      const [a, b, c, d] = text.runs.matrices.subarray(6 * run, 6 * run + 4);
+      const [a, b, c, d] = four(text.runs.matrices, 6 * run);
       const shear = d < 0 && Math.abs(b) < 1e-3 * Math.abs(a) ? c / -d : 0;
       if (Math.abs(shear) > 0.01) {
         if (shear < 0) {
@@ -698,11 +702,10 @@ function build(doc, pageIndex) {
     tabbed = undefined;
   }
   const segments = [];
+  const { paths } = objects;
+  const { points } = objects.segments;
   for (let i = 0; i < pathCount; i++) {
-    const [boxX, boxY, pathWidth, pathHeight] = objects.paths.boxes.subarray(
-      i * 4,
-      i * 4 + 4
-    );
+    const [boxX, boxY, pathWidth, pathHeight] = four(paths.boxes, i * 4);
     // Filled backgrounds are not table borders. Thin filled rectangles are.
     if (
       !(objects.paths.flags[i] & 2) &&
@@ -753,9 +756,7 @@ function build(doc, pageIndex) {
       }
     };
     for (let j = begin; j < end; j++) {
-      const point = Array.from(
-        objects.segments.points.subarray(2 * j, 2 * j + 2)
-      );
+      const point = [points[2 * j], points[2 * j + 1]];
       const kind = objects.segments.kinds[j];
       if ((kind & 3) === 2) {
         origin = point;
@@ -777,10 +778,7 @@ function build(doc, pageIndex) {
   };
   const placed = [];
   for (let i = 0; i < objects.images.count; i++) {
-    const [x, y, width, height] = objects.images.boxes.subarray(
-      4 * i,
-      4 * i + 4
-    );
+    const [x, y, width, height] = four(objects.images.boxes, 4 * i);
     if (width > 0 && height > 0) {
       placed.push({ x, y, width, height });
     }
@@ -816,7 +814,7 @@ function build(doc, pageIndex) {
   // on white). White text in a shaded header cell has its cell.
   const panels = [];
   for (let i = 0; i < pathCount; i++) {
-    const [x, y, w, h] = objects.paths.boxes.subarray(4 * i, 4 * i + 4);
+    const [x, y, w, h] = four(objects.paths.boxes, 4 * i);
     if (objects.paths.flags[i] & 1 && w * h < 0.5 * info.width * info.height) {
       panels.push({ x, y, w, h });
     }
@@ -848,7 +846,7 @@ function build(doc, pageIndex) {
         )));
   let dense = false;
   const boxes = Array.from({ length: pathCount }, (_, i) => {
-    const [x0, y0, w0, h0] = objects.paths.boxes.subarray(4 * i, 4 * i + 4);
+    const [x0, y0, w0, h0] = four(objects.paths.boxes, 4 * i);
     // Clip to the page: a fill drawn far past the edge is a backdrop.
     const x = Math.max(x0, 0);
     const y = Math.max(y0, 0);
@@ -873,7 +871,7 @@ function build(doc, pageIndex) {
   if (!art) {
     let union;
     for (let i = 0; i < objects.paths.count; i++) {
-      const [x0, y0, w0, h0] = objects.paths.boxes.subarray(4 * i, 4 * i + 4);
+      const [x0, y0, w0, h0] = four(objects.paths.boxes, 4 * i);
       const b = clip(info, { x: x0, y: y0, width: w0, height: h0 });
       if (!b || backdrop(b)) {
         continue;

@@ -218,11 +218,11 @@ func (w *writer) span(b *strings.Builder, s Span) {
 	if s.Italic {
 		props.WriteString(`<w:i/><w:iCs/>`)
 	}
-	color := s.Color
-	if color == "" {
-		color = "000000"
+	// What styles.xml defaults to (Arial, black, 10pt) is left out: a fifth
+	// of a long document's XML, and of the validator's time, restated it.
+	if s.Color != "" && s.Color != "000000" {
+		fmt.Fprintf(&props, `<w:color w:val="%s"/>`, esc(s.Color))
 	}
-	fmt.Fprintf(&props, `<w:color w:val="%s"/>`, esc(color))
 	t := twips(tracking)
 	if over := (float64(t)/20 - tracking) * float64(utf8.RuneCountInString(s.Text)-1); w.justified && over > 0.25 {
 		// Rounded to zero, -0.015pt a character overfilled a full line by
@@ -241,7 +241,9 @@ func (w *writer) span(b *strings.Builder, s Span) {
 	if rise := int(math.Round(s.Rise * 2)); rise != 0 {
 		fmt.Fprintf(&props, `<w:position w:val="%d"/>`, rise)
 	}
-	fmt.Fprintf(&props, `<w:sz w:val="%d"/><w:szCs w:val="%d"/>`, halfPoints(s.Size), halfPoints(s.Size))
+	if size := halfPoints(s.Size); size != 20 {
+		fmt.Fprintf(&props, `<w:sz w:val="%d"/><w:szCs w:val="%d"/>`, size, size)
+	}
 	// A link keeps the look the PDF drew: a link drawn plain (a whole
 	// paragraph made one link area) underlined was a rule under every line.
 	if s.Underline {
@@ -250,13 +252,19 @@ func (w *writer) span(b *strings.Builder, s Span) {
 	if lang != "" {
 		fmt.Fprintf(&props, `<w:lang w:eastAsia="%s"/>`, lang)
 	}
-	// A soft hyphen is Word's optional hyphen: shown only where a line breaks.
 	// Word sets each complex script in the run's cs face: a run per script
 	// (Malayalam in Kartika, Devanagari in Mangal), the rest as one.
 	for _, piece := range scriptPieces(s.Text) {
 		// A soft hyphen is Word's optional hyphen: shown only where a line breaks.
 		text := strings.ReplaceAll(esc(piece.text), "\u00ad", `</w:t><w:softHyphen/><w:t xml:space="preserve">`)
-		fmt.Fprintf(b, `<w:r><w:rPr><w:rFonts w:ascii="%s" w:hAnsi="%s" w:eastAsia="%s" w:cs="%s"/>%s</w:rPr><w:t xml:space="preserve">%s</w:t></w:r>`, f, f, esc(east), cmp.Or(piece.cs, f), props.String(), text)
+		rPr := props.String()
+		if cs := cmp.Or(piece.cs, f); f != "Arial" || east != "Arial" || cs != "Arial" {
+			rPr = fmt.Sprintf(`<w:rFonts w:ascii="%s" w:hAnsi="%s" w:eastAsia="%s" w:cs="%s"/>`, f, f, esc(east), cs) + rPr
+		}
+		if rPr != "" {
+			rPr = "<w:rPr>" + rPr + "</w:rPr>"
+		}
+		fmt.Fprintf(b, `<w:r>%s<w:t xml:space="preserve">%s</w:t></w:r>`, rPr, text)
 	}
 	if s.Link != "" {
 		b.WriteString(`</w:hyperlink>`)
@@ -523,7 +531,7 @@ func (w *writer) frame(l Line, pageWidth float64) string {
 
 // Explicit defaults: without them Word applies widow/orphan control and
 // paragraph spacing of its own and moves source lines to other pages.
-const styles = declaration + `<w:styles xmlns:w="` + word + `"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:eastAsia="Arial" w:cs="Arial"/><w:sz w:val="20"/><w:szCs w:val="20"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:widowControl w:val="0"/><w:autoSpaceDE w:val="0"/><w:autoSpaceDN w:val="0"/><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="table" w:default="1" w:styleId="TableNormal"><w:name w:val="Normal Table"/><w:tblPr><w:tblCellMar><w:top w:w="0" w:type="dxa"/><w:left w:w="0" w:type="dxa"/><w:bottom w:w="0" w:type="dxa"/><w:right w:w="0" w:type="dxa"/></w:tblCellMar></w:tblPr></w:style></w:styles>`
+const styles = declaration + `<w:styles xmlns:w="` + word + `"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:eastAsia="Arial" w:cs="Arial"/><w:color w:val="000000"/><w:sz w:val="20"/><w:szCs w:val="20"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:widowControl w:val="0"/><w:autoSpaceDE w:val="0"/><w:autoSpaceDN w:val="0"/><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="table" w:default="1" w:styleId="TableNormal"><w:name w:val="Normal Table"/><w:tblPr><w:tblCellMar><w:top w:w="0" w:type="dxa"/><w:left w:w="0" w:type="dxa"/><w:bottom w:w="0" w:type="dxa"/><w:right w:w="0" w:type="dxa"/></w:tblCellMar></w:tblPr></w:style></w:styles>`
 
 // Word puts an exact-spaced line's baseline this share of the line's height
 // below its top, in every font and at every height (measured in Word for Mac
@@ -549,7 +557,12 @@ func (w *writer) flow(b *strings.Builder, p Paragraph, origin, wrap, cursor floa
 	left := max(0, twips(p.Left-origin))
 	b.WriteString(`<w:p><w:pPr>`)
 	b.WriteString(tabStops(p.Lines, origin))
-	fmt.Fprintf(b, `<w:spacing w:before="%d" w:after="0" w:line="%d" w:lineRule="exact"/>`, twips(before), twips(pitch))
+	// Zeros and left alignment are styles.xml's defaults, left out.
+	if t := twips(before); t != 0 {
+		fmt.Fprintf(b, `<w:spacing w:before="%d" w:line="%d" w:lineRule="exact"/>`, t, twips(pitch))
+	} else {
+		fmt.Fprintf(b, `<w:spacing w:line="%d" w:lineRule="exact"/>`, twips(pitch))
+	}
 	indent := ""
 	if first := twips(p.Indent); first > 0 {
 		indent = fmt.Sprintf(` w:firstLine="%d"`, first)
@@ -557,7 +570,19 @@ func (w *writer) flow(b *strings.Builder, p Paragraph, origin, wrap, cursor floa
 		hang := min(-first, left)
 		indent = fmt.Sprintf(` w:hanging="%d"`, hang)
 	}
-	fmt.Fprintf(b, `<w:ind w:left="%d" w:right="%d"%s/><w:jc w:val="%s"/></w:pPr>`, left, max(0, twips(wrap-p.Right)), indent, p.Align)
+	if left != 0 {
+		indent = fmt.Sprintf(` w:left="%d"`, left) + indent
+	}
+	if right := max(0, twips(wrap-p.Right)); right != 0 {
+		indent += fmt.Sprintf(` w:right="%d"`, right)
+	}
+	if indent != "" {
+		fmt.Fprintf(b, `<w:ind%s/>`, indent)
+	}
+	if p.Align != "left" {
+		fmt.Fprintf(b, `<w:jc w:val="%s"/>`, p.Align)
+	}
+	b.WriteString(`</w:pPr>`)
 	for i, l := range p.Lines {
 		// Justification stretches every line but the last.
 		w.justified = p.Align == "both" && i < len(p.Lines)-1

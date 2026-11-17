@@ -1418,11 +1418,16 @@ func wordWidth(t *testing.T, s Span, face string) float64 {
 		}
 		return fallback
 	}
-	if !strings.Contains(doc, `w:ascii="`+strings.Split(face, "|")[0]+`"`) {
+	// A run in styles.xml's defaults (Arial, 10pt) leaves them out.
+	family := "Arial"
+	if m := regexp.MustCompile(`w:ascii="([^"]+)"`).FindStringSubmatch(doc); m != nil {
+		family = m[1]
+	}
+	if family != strings.Split(face, "|")[0] {
 		t.Fatalf("not laid out in %s: %s", face, doc)
 	}
 	n := float64(utf8.RuneCountInString(s.Text))
-	return emsOf(s.Text, face)*attr("sz", 0)/2*attr("w", 100)/100 + n*attr("spacing", 0)/20
+	return emsOf(s.Text, face)*attr("sz", 20)/2*attr("w", 100)/100 + n*attr("spacing", 0)/20
 }
 
 // written is the parts of the docx Write makes of pages.

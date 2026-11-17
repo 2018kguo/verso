@@ -279,8 +279,9 @@ func baselineLines(spans []Span) []Line {
 // raised or lowered text, instead of a line of its own.
 func scripts(ls []Line) []Line {
 	keep := make([]bool, len(ls))
+	sizes := make([]float64, len(ls)) // l.size() counts runes: once a line, not once a pair
 	for i := range keep {
-		keep[i] = true
+		keep[i], sizes[i] = true, ls[i].size()
 	}
 	for i, l := range ls {
 		// Math sets each index apart ("b₇ b₆ … b₀"): a line of many short
@@ -293,19 +294,20 @@ func scripts(ls []Line) []Line {
 		if (n > 12 || len(l.Spans) > 3) && (!short || n > 40) {
 			continue
 		}
-		size := l.size()
+		size := sizes[i]
 		for j := range ls {
 			m := ls[j]
-			if j == i || !keep[j] || m.size() < size/0.85 || math.Abs(m.Baseline-l.Baseline) > 0.6*m.size() {
+			if j == i || !keep[j] || sizes[j] < size/0.85 || math.Abs(m.Baseline-l.Baseline) > 0.6*sizes[j] {
 				continue
 			}
-			if l.X < m.X-1 || l.X+l.Width > m.X+m.Width+m.size() {
+			if l.X < m.X-1 || l.X+l.Width > m.X+m.Width+sizes[j] {
 				continue
 			}
 			for _, s := range l.Spans {
 				s.Rise = m.Baseline - s.Baseline
 				ls[j].Spans = append(ls[j].Spans, s)
 			}
+			sizes[j] = ls[j].size()
 			keep[i] = false
 			break
 		}

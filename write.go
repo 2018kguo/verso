@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"cmp"
+	"compress/flate"
 	"context"
 	"encoding/xml"
 	"fmt"
@@ -27,7 +28,27 @@ const relationships = "http://schemas.openxmlformats.org/officeDocument/2006/rel
 const packageRelationships = "http://schemas.openxmlformats.org/package/2006/relationships"
 const declaration = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>`
 
-func esc(s string) string { var b bytes.Buffer; _ = xml.EscapeText(&b, []byte(s)); return b.String() }
+// esc is xml.EscapeText's output; text with nothing it rewrites (printable
+// ASCII but <>&'") comes back as is, without its buffer.
+func esc(s string) string {
+	for i := 0; i < len(s); i++ {
+		if plain[s[i]] {
+			continue
+		}
+		var b bytes.Buffer
+		_ = xml.EscapeText(&b, []byte(s))
+		return b.String()
+	}
+	return s
+}
+
+var plain = func() (t [256]bool) {
+	for c := 0x20; c < 0x7f; c++ {
+		t[c] = !strings.ContainsRune(`<>&'"`, rune(c))
+	}
+	return t
+}()
+
 func twips(v float64) int { return int(math.Round(v * 20)) }
 
 // memo caches a pure string function: font names are few, and the writer
@@ -168,6 +189,7 @@ type writer struct {
 	next       int
 	fonts      map[string]Span // family -> a span drawn in it, for its flags
 	justified  bool            // writing a line justification stretches
+	props      map[runKey]string
 }
 
 func (w *writer) relationship(kind, target string, external bool) string {
@@ -211,18 +233,6 @@ func (w *writer) span(b *strings.Builder, s Span) {
 	if east == "" {
 		east = family
 	}
-	var props strings.Builder
-	if s.Weight >= 600 {
-		props.WriteString(`<w:b/><w:bCs/>`)
-	}
-	if s.Italic {
-		props.WriteString(`<w:i/><w:iCs/>`)
-	}
-	// What styles.xml defaults to (Arial, black, 10pt) is left out: a fifth
-	// of a long document's XML, and of the validator's time, restated it.
-	if s.Color != "" && s.Color != "000000" {
-		fmt.Fprintf(&props, `<w:color w:val="%s"/>`, esc(s.Color))
-	}
 	t := twips(tracking)
 	if over := (float64(t)/20 - tracking) * float64(utf8.RuneCountInString(s.Text)-1); w.justified && over > 0.25 {
 		// Rounded to zero, -0.015pt a character overfilled a full line by
@@ -231,33 +241,18 @@ func (w *writer) span(b *strings.Builder, s Span) {
 		// pulled the next line's first word up).
 		t = int(math.Floor(tracking * 20))
 	}
-	if t != 0 {
-		fmt.Fprintf(&props, `<w:spacing w:val="%d"/>`, t)
-	}
-	if scale != 0 && scale != 100 {
-		fmt.Fprintf(&props, `<w:w w:val="%d"/>`, min(600, max(1, scale)))
-	}
-	// Schema order: color, spacing, w, position, sz, szCs, u.
-	if rise := int(math.Round(s.Rise * 2)); rise != 0 {
-		fmt.Fprintf(&props, `<w:position w:val="%d"/>`, rise)
-	}
-	if size := halfPoints(s.Size); size != 20 {
-		fmt.Fprintf(&props, `<w:sz w:val="%d"/><w:szCs w:val="%d"/>`, size, size)
-	}
-	// A link keeps the look the PDF drew: a link drawn plain (a whole
-	// paragraph made one link area) underlined was a rule under every line.
-	if s.Underline {
-		props.WriteString(`<w:u w:val="single"/>`)
-	}
-	if lang != "" {
-		fmt.Fprintf(&props, `<w:lang w:eastAsia="%s"/>`, lang)
+	key := runKey{s.Weight >= 600, s.Italic, s.Underline, s.Color, lang, t, scale, int(math.Round(s.Rise * 2)), halfPoints(s.Size)}
+	props, ok := w.props[key]
+	if !ok {
+		props = key.render()
+		w.props[key] = props
 	}
 	// Word sets each complex script in the run's cs face: a run per script
 	// (Malayalam in Kartika, Devanagari in Mangal), the rest as one.
 	for _, piece := range scriptPieces(s.Text) {
 		// A soft hyphen is Word's optional hyphen: shown only where a line breaks.
 		text := strings.ReplaceAll(esc(piece.text), "\u00ad", `</w:t><w:softHyphen/><w:t xml:space="preserve">`)
-		rPr := props.String()
+		rPr := props
 		if cs := cmp.Or(piece.cs, f); f != "Arial" || east != "Arial" || cs != "Arial" {
 			rPr = fmt.Sprintf(`<w:rFonts w:ascii="%s" w:hAnsi="%s" w:eastAsia="%s" w:cs="%s"/>`, f, f, esc(east), cs) + rPr
 		}
@@ -274,6 +269,53 @@ func (w *writer) span(b *strings.Builder, s Span) {
 // lines draws a page's rules as one shape per stroke (width and color), a path of
 // line pieces: a shape each took 25 elements a rule, and a label's 13,000
 // rules made most of its document (and its validation time).
+// runKey is what a run's properties are made of. A long document has a few
+// thousand distinct sets over tens of thousands of runs: each is written once
+// and reused (as a terminal interns its cell styles).
+type runKey struct {
+	bold, italic, underline bool
+	color, lang             string
+	tracking, scale, rise   int
+	size                    int
+}
+
+func (k runKey) render() string {
+	var b strings.Builder
+	if k.bold {
+		b.WriteString(`<w:b/><w:bCs/>`)
+	}
+	if k.italic {
+		b.WriteString(`<w:i/><w:iCs/>`)
+	}
+	// What styles.xml defaults to (Arial, black, 10pt) is left out: a fifth
+	// of a long document's XML, and of the validator's time, restated it.
+	if k.color != "" && k.color != "000000" {
+		fmt.Fprintf(&b, `<w:color w:val="%s"/>`, esc(k.color))
+	}
+	if k.tracking != 0 {
+		fmt.Fprintf(&b, `<w:spacing w:val="%d"/>`, k.tracking)
+	}
+	if k.scale != 0 && k.scale != 100 {
+		fmt.Fprintf(&b, `<w:w w:val="%d"/>`, min(600, max(1, k.scale)))
+	}
+	// Schema order: color, spacing, w, position, sz, szCs, u.
+	if k.rise != 0 {
+		fmt.Fprintf(&b, `<w:position w:val="%d"/>`, k.rise)
+	}
+	if k.size != 20 {
+		fmt.Fprintf(&b, `<w:sz w:val="%d"/><w:szCs w:val="%d"/>`, k.size, k.size)
+	}
+	// A link keeps the look the PDF drew: a link drawn plain (a whole
+	// paragraph made one link area) underlined was a rule under every line.
+	if k.underline {
+		b.WriteString(`<w:u w:val="single"/>`)
+	}
+	if k.lang != "" {
+		fmt.Fprintf(&b, `<w:lang w:eastAsia="%s"/>`, k.lang)
+	}
+	return b.String()
+}
+
 func (w *writer) lines(lines []Segment) {
 	type stroke struct {
 		width float64
@@ -846,7 +888,7 @@ func write(ctx context.Context, dst io.Writer, pages []Page) (report Report, err
 	if len(pages) < 1 || len(pages) > 2000 {
 		return report, fmt.Errorf("document page limit")
 	}
-	w := writer{files: map[string][]byte{}, fonts: map[string]Span{}}
+	w := writer{files: map[string][]byte{}, fonts: map[string]Span{}, props: map[runKey]string{}}
 	w.body.WriteString(declaration + `<w:document xmlns:w="` + word + `" xmlns:r="` + relationships + `" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><w:body>`)
 	w.rels.WriteString(declaration + `<Relationships xmlns="` + packageRelationships + `">`)
 	serifByWidth(pages)
@@ -955,6 +997,13 @@ func write(ctx context.Context, dst io.Writer, pages []Page) (report Report, err
 			header.Method, header.CRC32 = zip.Store, crc32.ChecksumIEEE(data)
 			header.CompressedSize64, header.UncompressedSize64 = uint64(len(data)), uint64(len(data))
 			f, e = archive.CreateRaw(header)
+		} else if len(data) > deflateChunk {
+			header.CreatorVersion, header.ReaderVersion = 20, 20
+			header.CRC32 = crc32.ChecksumIEEE(data)
+			header.UncompressedSize64 = uint64(len(data))
+			data = deflate(data)
+			header.CompressedSize64 = uint64(len(data))
+			f, e = archive.CreateRaw(header)
 		} else {
 			f, e = archive.CreateHeader(header)
 		}
@@ -967,6 +1016,31 @@ func write(ctx context.Context, dst io.Writer, pages []Page) (report Report, err
 	}
 	err = archive.Close()
 	return report, err
+}
+
+const deflateChunk = 1 << 20
+
+// deflate compresses a large part in 1 MiB chunks at once (as pigz does):
+// each but the last ends in a sync flush, so they join into one stream.
+// The document of a 166-page label took a third of the writer's time.
+func deflate(data []byte) []byte {
+	chunks := make([][]byte, (len(data)+deflateChunk-1)/deflateChunk)
+	var wg sync.WaitGroup
+	for i := range chunks {
+		wg.Go(func() {
+			var b bytes.Buffer
+			f, _ := flate.NewWriter(&b, flate.DefaultCompression)
+			_, _ = f.Write(data[i*deflateChunk : min(len(data), (i+1)*deflateChunk)])
+			if i < len(chunks)-1 {
+				_ = f.Flush()
+			} else {
+				_ = f.Close()
+			}
+			chunks[i] = b.Bytes()
+		})
+	}
+	wg.Wait()
+	return bytes.Join(chunks, nil)
 }
 
 func marginTypes(names []string) string {

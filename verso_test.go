@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"bytes"
 	"cmp"
+	"compress/flate"
 	"context"
 	"encoding/json"
 	"encoding/xml"
@@ -2528,4 +2529,42 @@ func TestMixedComplexScriptsTakeTheirOwnFaces(t *testing.T) {
 	if !strings.Contains(doc, `w:cs="Kartika"/>`) || !strings.Contains(doc, `w:cs="Mangal"/>`) || !strings.Contains(doc, `>മന ab </w:t>`) {
 		t.Fatalf("runs: %s", doc)
 	}
+}
+
+// A part over 1 MiB is deflated in chunks that join into one stream: it
+// reads back whole, with the sizes and CRC its header states (archive/zip
+// checks both on reading to the end).
+func TestLargePartsDeflateInChunks(t *testing.T) {
+	data := make([]byte, 3*deflateChunk+12345)
+	for i := range data {
+		data[i] = byte(i*7 + i/1000) // compressible, but not a run
+	}
+	back, err := io.ReadAll(flate.NewReader(bytes.NewReader(deflate(data))))
+	if err != nil || !bytes.Equal(back, data) {
+		t.Fatalf("chunked deflate round trip: %v, %d of %d bytes", err, len(back), len(data))
+	}
+	var spans []Span
+	for i := range 9000 {
+		spans = append(spans, span(fmt.Sprintf("line %d of a long page", i), 72, 72+float64(i%60)*12, 120))
+	}
+	var out bytes.Buffer
+	if _, err := Write(&out, []Page{{Width: 612, Height: 792, Spans: spans}}); err != nil {
+		t.Fatal(err)
+	}
+	z, err := zip.NewReader(bytes.NewReader(out.Bytes()), int64(out.Len()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range z.File {
+		if f.Name != "word/document.xml" {
+			continue
+		}
+		r, _ := f.Open()
+		doc, err := io.ReadAll(r)
+		if err != nil || len(doc) <= deflateChunk || uint64(len(doc)) != f.UncompressedSize64 || !bytes.Contains(doc, []byte("line 8999 of a long page")) {
+			t.Fatalf("document.xml: %v, %d bytes (header %d)", err, len(doc), f.UncompressedSize64)
+		}
+		return
+	}
+	t.Fatal("no document.xml")
 }

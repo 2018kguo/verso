@@ -143,7 +143,13 @@ func Extract(ctx context.Context, path string, opts Options) ([]Page, error) {
 	}
 	waitErr := cmd.Wait()
 	if decodeErr != nil {
-		return nil, decodeErr // cancel() above stopped the decoder; report why
+		// cancel() above stopped the decoder; report why, with what it said:
+		// a line cut short (once in thousands of conversions under load)
+		// otherwise reads as JSON, not as the decoder's failure.
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			return nil, fmt.Errorf("%w (decoder: %s)", decodeErr, msg)
+		}
+		return nil, decodeErr
 	}
 	if ctx.Err() != nil {
 		return nil, fmt.Errorf("decoder stopped: %w", ctx.Err())

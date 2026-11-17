@@ -3,6 +3,7 @@ package verso
 import (
 	"archive/zip"
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/xml"
 	"fmt"
@@ -14,6 +15,8 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -27,14 +30,49 @@ const declaration = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>`
 func esc(s string) string { var b bytes.Buffer; _ = xml.EscapeText(&b, []byte(s)); return b.String() }
 func twips(v float64) int { return int(math.Round(v * 20)) }
 
-var subset = regexp.MustCompile(`^[A-Z]{6}\+`)
+// memo caches a pure string function: font names are few, and the writer
+// asks for each span's family many times (a regexp and allocations a call
+// were a fifth of its time). Bounded: past 4096 names it stops storing.
+type memo struct {
+	m sync.Map
+	n atomic.Int32
+}
+
+var fontNames, fontKeys memo
+
+func (c *memo) get(k string, f func(string) string) string {
+	if v, ok := c.m.Load(k); ok {
+		return v.(string)
+	}
+	v := f(k)
+	if c.n.Add(1) <= 4096 {
+		c.m.Store(k, v)
+	}
+	return v
+}
+
+// withoutSubset drops a subset tag ("ABCDEF+"), by hand: a regexp here,
+// called for every span's every measure, was an eighth of the writer's time.
+func withoutSubset(s string) string {
+	if len(s) < 7 || s[6] != '+' {
+		return s
+	}
+	for i := range 6 {
+		if s[i] < 'A' || s[i] > 'Z' {
+			return s
+		}
+	}
+	return s[7:]
+}
+
 var camel = regexp.MustCompile(`([a-z])([A-Z])`)
 
 // fontName turns a PostScript name into the family Word knows:
 // "ABCDEF+TimesNewRomanPS-BoldMT" is "Times New Roman"; "Arial-Black" is
 // "Arial Black". Bold and italic are run properties, not family names.
-func fontName(s string) string {
-	s = subset.ReplaceAllString(s, "")
+func fontName(s string) string { return fontNames.get(s, nameOf) }
+func nameOf(s string) string {
+	s = withoutSubset(s)
 	family, style, _ := strings.Cut(strings.ReplaceAll(s, ",", "-"), "-")
 	style, _, _ = strings.Cut(style, "-")
 	for _, suffix := range []string{"PSMT", "MT", "PS"} {
@@ -114,7 +152,8 @@ var fontAliases = map[string]string{
 	"dejavusans": "Verdana", "bitstreamverasans": "Verdana",
 }
 
-func fontKey(s string) string {
+func fontKey(s string) string { return fontKeys.get(s, keyOf) }
+func keyOf(s string) string {
 	return strings.Map(func(r rune) rune {
 		if unicode.IsLetter(r) || unicode.IsDigit(r) {
 			return unicode.ToLower(r)
@@ -172,18 +211,18 @@ func (w *writer) span(b *strings.Builder, s Span) {
 	if east == "" {
 		east = family
 	}
-	fmt.Fprintf(b, `<w:r><w:rPr><w:rFonts w:ascii="%s" w:hAnsi="%s" w:eastAsia="%s" w:cs="%s"/>`, f, f, esc(east), f)
+	var props strings.Builder
 	if s.Weight >= 600 {
-		b.WriteString(`<w:b/><w:bCs/>`)
+		props.WriteString(`<w:b/><w:bCs/>`)
 	}
 	if s.Italic {
-		b.WriteString(`<w:i/><w:iCs/>`)
+		props.WriteString(`<w:i/><w:iCs/>`)
 	}
 	color := s.Color
 	if color == "" {
 		color = "000000"
 	}
-	fmt.Fprintf(b, `<w:color w:val="%s"/>`, esc(color))
+	fmt.Fprintf(&props, `<w:color w:val="%s"/>`, esc(color))
 	t := twips(tracking)
 	if over := (float64(t)/20 - tracking) * float64(utf8.RuneCountInString(s.Text)-1); w.justified && over > 0.25 {
 		// Rounded to zero, -0.015pt a character overfilled a full line by
@@ -193,30 +232,124 @@ func (w *writer) span(b *strings.Builder, s Span) {
 		t = int(math.Floor(tracking * 20))
 	}
 	if t != 0 {
-		fmt.Fprintf(b, `<w:spacing w:val="%d"/>`, t)
+		fmt.Fprintf(&props, `<w:spacing w:val="%d"/>`, t)
 	}
 	if scale != 0 && scale != 100 {
-		fmt.Fprintf(b, `<w:w w:val="%d"/>`, min(600, max(1, scale)))
+		fmt.Fprintf(&props, `<w:w w:val="%d"/>`, min(600, max(1, scale)))
 	}
 	// Schema order: color, spacing, w, position, sz, szCs, u.
 	if rise := int(math.Round(s.Rise * 2)); rise != 0 {
-		fmt.Fprintf(b, `<w:position w:val="%d"/>`, rise)
+		fmt.Fprintf(&props, `<w:position w:val="%d"/>`, rise)
 	}
-	fmt.Fprintf(b, `<w:sz w:val="%d"/><w:szCs w:val="%d"/>`, halfPoints(s.Size), halfPoints(s.Size))
+	fmt.Fprintf(&props, `<w:sz w:val="%d"/><w:szCs w:val="%d"/>`, halfPoints(s.Size), halfPoints(s.Size))
 	// A link keeps the look the PDF drew: a link drawn plain (a whole
 	// paragraph made one link area) underlined was a rule under every line.
 	if s.Underline {
-		b.WriteString(`<w:u w:val="single"/>`)
+		props.WriteString(`<w:u w:val="single"/>`)
 	}
 	if lang != "" {
-		fmt.Fprintf(b, `<w:lang w:eastAsia="%s"/>`, lang)
+		fmt.Fprintf(&props, `<w:lang w:eastAsia="%s"/>`, lang)
 	}
 	// A soft hyphen is Word's optional hyphen: shown only where a line breaks.
-	text := strings.ReplaceAll(esc(s.Text), "\u00ad", `</w:t><w:softHyphen/><w:t xml:space="preserve">`)
-	fmt.Fprintf(b, `</w:rPr><w:t xml:space="preserve">%s</w:t></w:r>`, text)
+	// Word sets each complex script in the run's cs face: a run per script
+	// (Malayalam in Kartika, Devanagari in Mangal), the rest as one.
+	for _, piece := range scriptPieces(s.Text) {
+		// A soft hyphen is Word's optional hyphen: shown only where a line breaks.
+		text := strings.ReplaceAll(esc(piece.text), "\u00ad", `</w:t><w:softHyphen/><w:t xml:space="preserve">`)
+		fmt.Fprintf(b, `<w:r><w:rPr><w:rFonts w:ascii="%s" w:hAnsi="%s" w:eastAsia="%s" w:cs="%s"/>%s</w:rPr><w:t xml:space="preserve">%s</w:t></w:r>`, f, f, esc(east), cmp.Or(piece.cs, f), props.String(), text)
+	}
 	if s.Link != "" {
 		b.WriteString(`</w:hyperlink>`)
 	}
+}
+
+// lines draws a page's rules as one shape per stroke (width and color), a path of
+// line pieces: a shape each took 25 elements a rule, and a label's 13,000
+// rules made most of its document (and its validation time).
+func (w *writer) lines(lines []Segment) {
+	type stroke struct {
+		width float64
+		color string
+	}
+	groups := map[stroke][]Segment{}
+	var strokes []stroke
+	for _, s := range lines {
+		// A stroke Recto did not measure is a hairline form rule.
+		k := stroke{math.Round(cmp.Or(s.Width, 0.75)*4) / 4, cmp.Or(s.Color, "000000")}
+		if _, ok := groups[k]; !ok {
+			strokes = append(strokes, k)
+		}
+		groups[k] = append(groups[k], s)
+	}
+	emu := func(v float64) int64 { return int64(math.Round(v * 12700)) }
+	for _, k := range strokes {
+		group, width := groups[k], k.width
+		x0, y0, x1, y1 := math.Inf(1), math.Inf(1), math.Inf(-1), math.Inf(-1)
+		for _, s := range group {
+			x0, y0 = min(x0, s.X1, s.X2), min(y0, s.Y1, s.Y2)
+			x1, y1 = max(x1, s.X1, s.X2), max(y1, s.Y1, s.Y2)
+		}
+		cx, cy := emu(x1)-emu(x0), emu(y1)-emu(y0)
+		var path strings.Builder
+		for _, s := range group {
+			fmt.Fprintf(&path, `<a:moveTo><a:pt x="%d" y="%d"/></a:moveTo><a:lnTo><a:pt x="%d" y="%d"/></a:lnTo>`, emu(s.X1)-emu(x0), emu(s.Y1)-emu(y0), emu(s.X2)-emu(x0), emu(s.Y2)-emu(y0))
+		}
+		w.next++
+		fmt.Fprintf(&w.body, `<w:r><w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="0" behindDoc="1" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="page"><wp:posOffset>%d</wp:posOffset></wp:positionH><wp:positionV relativeFrom="page"><wp:posOffset>%d</wp:posOffset></wp:positionV><wp:extent cx="%d" cy="%d"/><wp:wrapNone/><wp:docPr id="%d" name="Lines %[5]d"/><wp:cNvGraphicFramePr/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="%[3]d" cy="%[4]d"/></a:xfrm><a:custGeom><a:pathLst><a:path w="%[9]d" h="%[10]d" fill="none">%[6]s</a:path></a:pathLst></a:custGeom><a:noFill/><a:ln w="%[7]d"><a:solidFill><a:srgbClr val="%[8]s"/></a:solidFill></a:ln></wps:spPr><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>`,
+			// A path's frame divides its points: one row of rules (or a
+			// column) is 0 deep, and Word drew nothing for 0/0.
+			emu(x0), emu(y0), cx, cy, w.next, path.String(), emu(width), k.color, max(cx, 1), max(cy, 1))
+	}
+}
+
+// complexScript is the face Word ships (on Windows and Mac) for a script it
+// lays out as complex: Word sets such text in the run's cs font, and a Latin
+// face there (Arial) left it to a fallback of Word's choosing, whose widths ran
+// Malayalam Wikipedia from 71 pages to 79.
+// scriptPieces splits text where its complex script changes; text with
+// one script (or none) is one piece.
+func scriptPieces(text string) []struct{ text, cs string } {
+	var pieces []struct{ text, cs string }
+	start, cs := 0, ""
+	for i, r := range text {
+		if f := complexFace(r); f != "" && f != cs {
+			if cs != "" {
+				pieces = append(pieces, struct{ text, cs string }{text[start:i], cs})
+				start = i
+			}
+			cs = f
+		}
+	}
+	return append(pieces, struct{ text, cs string }{text[start:], cs})
+}
+
+func complexScript(text string) string {
+	for _, r := range text {
+		if f := complexFace(r); f != "" {
+			return f
+		}
+	}
+	return ""
+}
+
+func complexFace(r rune) string {
+	switch {
+	case r >= 0x900 && r <= 0x97f:
+		return "Mangal"
+	case r >= 0xb80 && r <= 0xbff:
+		return "Latha"
+	case r >= 0xc00 && r <= 0xc7f:
+		return "Gautami"
+	case r >= 0xc80 && r <= 0xcff:
+		return "Tunga"
+	case r >= 0xd00 && r <= 0xd7f:
+		return "Kartika"
+	case r >= 0xf00 && r <= 0xfff:
+		return "Microsoft Himalaya"
+	case r >= 0x1000 && r <= 0x109f:
+		return "Myanmar Text"
+	}
+	return ""
 }
 
 // eastAsian is the East Asian font and language for a span's CJK text, from
@@ -232,7 +365,10 @@ func eastAsian(s Span) (font, lang string) {
 			hangul = true
 		case unicode.In(r, unicode.Hiragana, unicode.Katakana):
 			kana = true
-		case unicode.Is(unicode.Han, r):
+		// CJK punctuation and full-width forms ("，", "《") are set in the
+		// same face: left to Word's fallback, a comma took another font's
+		// width and line breaks.
+		case unicode.Is(unicode.Han, r) || r >= 0x3000 && r <= 0x303f || r >= 0xff00 && r <= 0xffef:
 			han = true
 		}
 	}
@@ -258,7 +394,9 @@ func eastAsian(s Span) (font, lang string) {
 	return pick("SimSun", "SimHei", "zh-CN")
 }
 
-var cjkSerif = regexp.MustCompile(`serif|mincho|ming|song|sun|batang|myeongjo|kai|fang`)
+// FangZheng's names abbreviate theirs: FZSSK ShuSong, FZBSK BaoSong,
+// FZXBSK XiaoBiaoSong, FZFSK FangSong, FZKTK KaiTi.
+var cjkSerif = regexp.MustCompile(`serif|mincho|ming|song|sun|batang|myeongjo|kai|fang|^fz(ss|bs|xbs|fs|kt)`)
 
 // cjkRegion reports whether a font key names a region: "notosanscjkjp"
 // ends in jp; "msmincho" contains mincho.
@@ -684,7 +822,7 @@ func write(ctx context.Context, dst io.Writer, pages []Page) (report Report, err
 		return report, fmt.Errorf("document page limit")
 	}
 	w := writer{files: map[string][]byte{}, fonts: map[string]Span{}}
-	w.body.WriteString(declaration + `<w:document xmlns:w="` + word + `" xmlns:r="` + relationships + `" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><w:body>`)
+	w.body.WriteString(declaration + `<w:document xmlns:w="` + word + `" xmlns:r="` + relationships + `" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><w:body>`)
 	w.rels.WriteString(declaration + `<Relationships xmlns="` + packageRelationships + `">`)
 	serifByWidth(pages)
 	margins, body, firstNumber := w.margins(pages)
@@ -701,8 +839,9 @@ func write(ctx context.Context, dst io.Writer, pages []Page) (report Report, err
 		// A page's images anchor to one hairline paragraph at its top: they
 		// sit at page positions, and a paragraph each at the page's end took
 		// a line each and spilled full pages onto a new one.
-		if len(l.Images) > 0 {
+		if len(l.Images) > 0 || len(l.Lines) > 0 {
 			w.body.WriteString(`<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="1" w:lineRule="exact"/><w:rPr><w:sz w:val="1"/></w:rPr></w:pPr>`)
+			w.lines(l.Lines)
 			for j, im := range l.Images {
 				name := fmt.Sprintf("media/page%d-image%d.png", i+1, j+1)
 				w.files["word/"+name] = im.PNG

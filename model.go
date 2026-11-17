@@ -30,7 +30,16 @@ type Span struct {
 	Leader                  bool    `json:"-"` // after drawn leader dots: a right tab with a dot leader
 	Ink                     float64 // width to the last glyph that isn't a space; 0 when unknown
 }
-type Segment struct{ X1, Y1, X2, Y2 float64 }
+
+// Segment is a straight piece of a thin path: Width is its stroke, Color
+// its ink when not black, Painted that the reader already drew it in an art
+// image (or saw nothing to draw).
+type Segment struct {
+	X1, Y1, X2, Y2 float64
+	Width          float64
+	Color          string
+	Painted        bool
+}
 type Image struct {
 	Box
 	PNG []byte
@@ -91,6 +100,7 @@ type Layout struct {
 	Items  []Item
 	Tables []Table
 	Images []Image
+	Lines  []Segment // rules no table rebuilt (a lone frame, a footer rule)
 }
 
 // Bounds precede geometry algorithms, not only the writer or child process.
@@ -151,6 +161,9 @@ func (p Page) validate() error {
 		}
 	}
 	for _, s := range p.Segments {
+		if !finite(s.Width) || s.Width < 0 || s.Width > 100 || s.Color != "" && !colorPattern.MatchString(s.Color) {
+			return fmt.Errorf("invalid stroke")
+		}
 		for _, n := range []float64{s.X1, s.X2, s.Y1, s.Y2} {
 			if !finite(n) || n < -2 || n > maxPage+2 {
 				return fmt.Errorf("invalid path geometry")
@@ -187,7 +200,7 @@ func (p *Page) sanitize() []string {
 			}
 			for i := range p.Segments {
 				g := &p.Segments[i]
-				g.X1, g.Y1, g.X2, g.Y2 = g.X1*k, g.Y1*k, g.X2*k, g.Y2*k
+				g.X1, g.Y1, g.X2, g.Y2, g.Width = g.X1*k, g.Y1*k, g.X2*k, g.Y2*k, g.Width*k
 			}
 			for i := range p.Images {
 				m := &p.Images[i]
@@ -453,6 +466,9 @@ func layout(p Page) (Layout, error) {
 	}
 	var result Layout
 	assigned := make([]bool, len(p.Spans))
+	// A group no table rebuilds is drawn as lines: the reader leaves thin
+	// art under text to Word, and a lone frame around a form field vanished.
+	tabled := map[int]bool{}
 grids:
 	for _, key := range order {
 		g := groups[key]
@@ -539,8 +555,24 @@ grids:
 			}
 			table.Rows = append(table.Rows, row)
 		}
+		// Empty field boxes the reader already drew are no table: placed in
+		// the flow after their row labels, a copy ran a form onto a new page.
+		empty := !slices.ContainsFunc(table.Rows, func(row []Cell) bool {
+			return slices.ContainsFunc(row, func(c Cell) bool { return len(c.Spans) > 0 })
+		})
+		if empty && !slices.ContainsFunc(g, func(s Segment) bool { return !s.Painted }) {
+			continue
+		}
 		result.Tables = append(result.Tables, table)
+		tabled[key] = true
 		assigned = claimed
+	}
+	for _, key := range order {
+		for _, s := range groups[key] {
+			if !tabled[key] && !s.Painted {
+				result.Lines = append(result.Lines, s)
+			}
+		}
 	}
 	var free []Span
 	for i, s := range p.Spans {

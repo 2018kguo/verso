@@ -20,8 +20,8 @@ import (
 )
 
 // The runes a face table covers, in order: Latin, punctuation, currency,
-// letterlike symbols.
-var ranges = [][2]rune{{0x20, 0x24f}, {0x2000, 0x206f}, {0x20a0, 0x20bf}, {0x2100, 0x2122}}
+// letterlike symbols, Devanagari, Malayalam.
+var ranges = [][2]rune{{0x20, 0x24f}, {0x2000, 0x206f}, {0x20a0, 0x20bf}, {0x2100, 0x2122}, {0x900, 0x97f}, {0xd00, 0xd7f}}
 
 var faces = []struct{ family, file string }{
 	{"Arial", "LiberationSans-Regular"}, {"Arial|b", "LiberationSans-Bold"}, {"Arial|i", "LiberationSans-Italic"}, {"Arial|bi", "LiberationSans-BoldItalic"},
@@ -54,6 +54,10 @@ var faces = []struct{ family, file string }{
 	{"Lucida Console", "Lucida Console"}, {"Lucida Console|b", "Lucida Console"}, {"Lucida Console|i", "Lucida Console"}, {"Lucida Console|bi", "Lucida Console"},
 	{"Lucida Sans Unicode", "Lucida Sans Unicode"}, {"Lucida Sans Unicode|b", "Lucida Sans Unicode"}, {"Lucida Sans Unicode|i", "Lucida Sans Unicode"}, {"Lucida Sans Unicode|bi", "Lucida Sans Unicode"},
 	{"Arial Black", "ariblk"}, {"Arial Black|b", "ariblk"}, {"Arial Black|i", "ariblk"}, {"Arial Black|bi", "ariblk"},
+	// Complex scripts' cs faces: Word sets Hindi in Mangal and Malayalam in
+	// Kartika, wider than the Noto faces PDFs carry.
+	{"Mangal", "mangal"}, {"Mangal|b", "MangalB"}, {"Mangal|i", "mangal"}, {"Mangal|bi", "MangalB"},
+	{"Kartika", "Kartika"}, {"Kartika|b", "Kartikab"}, {"Kartika|i", "Kartika"}, {"Kartika|bi", "Kartikab"},
 }
 
 func main() {

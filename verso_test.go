@@ -2,7 +2,9 @@ package verso
 
 import (
 	"archive/zip"
+	"bufio"
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"encoding/xml"
@@ -33,9 +35,9 @@ func span(text string, x, y, w float64) Span {
 func tablePage() Page {
 	p := Page{Width: 612, Height: 792, Spans: []Span{span("Report & review", 50, 30, 100), span("Merged heading", 55, 105, 160), span("123.45", 55, 135, 50), span("Note", 155, 135, 40), span("Due", 155, 165, 40)}}
 	for _, y := range []float64{100, 130, 190} {
-		p.Segments = append(p.Segments, Segment{50, y, 250, y})
+		p.Segments = append(p.Segments, Segment{X1: 50, Y1: y, X2: 250, Y2: y})
 	}
-	p.Segments = append(p.Segments, Segment{150, 160, 250, 160}, Segment{50, 100, 50, 190}, Segment{250, 100, 250, 190}, Segment{150, 130, 150, 190})
+	p.Segments = append(p.Segments, Segment{X1: 150, Y1: 160, X2: 250, Y2: 160}, Segment{X1: 50, Y1: 100, X2: 50, Y2: 190}, Segment{X1: 250, Y1: 100, X2: 250, Y2: 190}, Segment{X1: 150, Y1: 130, X2: 150, Y2: 190})
 	return p
 }
 
@@ -168,10 +170,10 @@ func TestTableBoundaryCellOwnership(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			p := Page{Width: 612, Height: 792, Spans: []Span{span("R", tc.x-3, tc.y-6, 6)}}
 			for _, x := range []float64{50, 200, 350} {
-				p.Segments = append(p.Segments, Segment{x, 100, x, 160})
+				p.Segments = append(p.Segments, Segment{X1: x, Y1: 100, X2: x, Y2: 160})
 			}
 			for _, y := range []float64{100, 130, 160} {
-				p.Segments = append(p.Segments, Segment{50, y, 350, y})
+				p.Segments = append(p.Segments, Segment{X1: 50, Y1: y, X2: 350, Y2: y})
 			}
 			var b bytes.Buffer
 			if _, err := Write(&b, []Page{p}); err != nil {
@@ -685,10 +687,10 @@ func TestWrappedListItemContinues(t *testing.T) {
 // border under a heading runs on across the column and stays art.
 func TestUnderlineVersusHeadingRule(t *testing.T) {
 	heading := []Span{span("PREPARING THE OFFICE", 70, 100, 150)}
-	if underlines(heading, Segment{60, 111, 550, 111}) || heading[0].Underline {
+	if underlines(heading, Segment{X1: 60, Y1: 111, X2: 550, Y2: 111}) || heading[0].Underline {
 		t.Fatal("heading border taken as an underline")
 	}
-	if !underlines(heading, Segment{70, 111, 220, 111}) || !heading[0].Underline {
+	if !underlines(heading, Segment{X1: 70, Y1: 111, X2: 220, Y2: 111}) || !heading[0].Underline {
 		t.Fatal("underline missed")
 	}
 }
@@ -869,7 +871,7 @@ func TestCellBordersAreNotUnderlines(t *testing.T) {
 	var spans []Span
 	for r := 0; r < 3; r++ {
 		for c := 0; c < 3; c++ {
-			segs = append(segs, Segment{xs[c], ys[r], xs[c+1], ys[r]}, Segment{xs[c], ys[r+1], xs[c+1], ys[r+1]}, Segment{xs[c], ys[r], xs[c], ys[r+1]}, Segment{xs[c+1], ys[r], xs[c+1], ys[r+1]})
+			segs = append(segs, Segment{X1: xs[c], Y1: ys[r], X2: xs[c+1], Y2: ys[r]}, Segment{X1: xs[c], Y1: ys[r+1], X2: xs[c+1], Y2: ys[r+1]}, Segment{X1: xs[c], Y1: ys[r], X2: xs[c], Y2: ys[r+1]}, Segment{X1: xs[c+1], Y1: ys[r], X2: xs[c+1], Y2: ys[r+1]})
 			spans = append(spans, Span{Box: Box{xs[c] + 3, ys[r+1] - 11, 54, 10}, Text: fmt.Sprintf("1,234,%d%d", r, c), Font: "Arial", Color: "000000", Size: 10, Baseline: ys[r+1] - 3})
 		}
 	}
@@ -1038,7 +1040,7 @@ func TestRunningLineEdgeCases(t *testing.T) {
 		var pages []Page
 		for range 3 {
 			p := pageWith(span("SOP-001 Rev 2", 80, 20, 100))
-			p.Segments = []Segment{{70, 15, 70, 40}, {300, 15, 300, 40}, {70, 15, 300, 15}, {70, 40, 300, 40}}
+			p.Segments = []Segment{{X1: 70, Y1: 15, X2: 70, Y2: 40}, {X1: 300, Y1: 15, X2: 300, Y2: 40}, {X1: 70, Y1: 15, X2: 300, Y2: 15}, {X1: 70, Y1: 40, X2: 300, Y2: 40}}
 			pages = append(pages, p)
 		}
 		if body, _ := everywhere(written(t, pages), "SOP-001"); body != 3 {
@@ -1059,7 +1061,7 @@ func TestRunningLineEdgeCases(t *testing.T) {
 		var pages []Page
 		for range 3 {
 			p := pageWith(span("CONFIDENTIAL", 250, 20, 90))
-			p.Segments = []Segment{{250, 31.5, 340, 31.5}}
+			p.Segments = []Segment{{X1: 250, Y1: 31.5, X2: 340, Y2: 31.5}}
 			pages = append(pages, p)
 		}
 		for name, xml := range written(t, pages) {
@@ -1821,7 +1823,7 @@ func TestLinksKeepTheirDrawnLook(t *testing.T) {
 		s.Link = "https://www.fda.gov"
 		p := Page{Width: 612, Height: 792, Spans: []Span{s}}
 		if underlined {
-			p.Segments = []Segment{{72, 111.5, 312, 111.5}}
+			p.Segments = []Segment{{X1: 72, Y1: 111.5, X2: 312, Y2: 111.5}}
 		}
 		doc := written(t, []Page{p})["word/document.xml"]
 		if strings.Contains(doc, `<w:u w:val="single"/>`) != underlined || !strings.Contains(doc, "<w:hyperlink") {
@@ -1841,10 +1843,10 @@ func TestCellParagraphWrapsAtItsText(t *testing.T) {
 	spans[2].Width = 290
 	var segs []Segment
 	for _, y := range []float64{90, 110, 200} {
-		segs = append(segs, Segment{72, y, 560, y})
+		segs = append(segs, Segment{X1: 72, Y1: y, X2: 560, Y2: y})
 	}
 	for _, x := range []float64{72, 500, 560} {
-		segs = append(segs, Segment{x, 90, x, 200})
+		segs = append(segs, Segment{X1: x, Y1: 90, X2: x, Y2: 200})
 	}
 	doc := written(t, []Page{{Width: 612, Height: 792, Spans: spans, Segments: segs}})["word/document.xml"]
 	cell := doc[strings.Index(doc, "any financial"):]
@@ -1863,10 +1865,10 @@ func TestCellShortLinesStayApart(t *testing.T) {
 	}
 	var segs []Segment
 	for _, y := range []float64{90, 110, 200} {
-		segs = append(segs, Segment{72, y, 560, y})
+		segs = append(segs, Segment{X1: 72, Y1: y, X2: 560, Y2: y})
 	}
 	for _, x := range []float64{72, 330, 560} {
-		segs = append(segs, Segment{x, 90, x, 200})
+		segs = append(segs, Segment{X1: x, Y1: 90, X2: x, Y2: 200})
 	}
 	doc := written(t, []Page{{Width: 612, Height: 792, Spans: spans, Segments: segs}})["word/document.xml"]
 	if cell := doc[strings.Index(doc, "1 person"):strings.Index(doc, "9 person")]; strings.Count(cell, "<w:p>") != 2 {
@@ -2073,6 +2075,8 @@ func TestEastAsianFontFollowsScriptAndRegion(t *testing.T) {
 		{"Arial", "ウィキペディア", "MS Gothic", "ja-JP"},
 		{"Arial", "주기율표", "Malgun Gothic", "ko-KR"},
 		{"Arial", "Plain text", "", ""},
+		{"FZSSK--GBK1-0", "区块链", "SimSun", "zh-CN"},
+		{"E-BZ", "》（", "SimHei", "zh-CN"},
 	} {
 		s := span(c.text, 72, 100, 50)
 		s.Font = c.font
@@ -2201,6 +2205,25 @@ func TestHiddenOCRLayerKeepsTheScan(t *testing.T) {
 	if p := pages[0]; len(p.Spans) != 0 || len(p.Images) != 1 || p.Images[0].Width < 600 {
 		t.Fatalf("spans %d images %+v: want the scan alone", len(p.Spans), p.Images)
 	}
+	// Sixteen large images before the scan (an image a glyph lies on is
+	// looked up on a grid, not among the first few): its OCR layer is still
+	// found hidden.
+	var decoys strings.Builder
+	for x := 0; x <= 30; x += 2 {
+		fmt.Fprintf(&decoys, "q 350 0 0 350 %d 442 cm /Im1 Do Q ", x)
+	}
+	content = decoys.String() + "q 350 0 0 350 262 442 cm /Im1 Do Q BT /F1 12 Tf 3 Tr 380 590 Td (Scanned words) Tj ET\n"
+	writePDF(t, input, []string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Count 1 /Kids [3 0 R] >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> /XObject << /Im1 6 0 R >> >> /Contents 5 0 R >>",
+		"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+		fmt.Sprintf("<< /Length %d >>\nstream\n%sendstream", len(content), content),
+		"<< /Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Length 12 >>\nstream\n\xf0\xf0\xf0\xe0\xe0\xe0\xe0\xe0\xe0\xf0\xf0\xf0\nendstream",
+	})
+	if pages, err = Extract(context.Background(), input, opts); err != nil || len(pages[0].Spans) != 0 {
+		t.Fatalf("%v: spans %+v, want the OCR layer hidden behind the seventeenth image", err, pages)
+	}
 }
 
 // Rows ruled inside a box with no column rules are a one-column table: its
@@ -2318,5 +2341,186 @@ func TestRepeatedCharacterOnALineIsKept(t *testing.T) {
 	}
 	if n != 600 {
 		t.Fatalf("%d of 600 kept", n)
+	}
+}
+
+// A frame no table rebuilds (a lone box around a form's free-text field) is
+// drawn as lines, one shape per stroke width; rules the reader already painted, or that make a table,
+// are not drawn again. Empty painted field boxes are no table.
+func TestUnrebuiltRulesAreDrawn(t *testing.T) {
+	box := []Segment{
+		{X1: 40, Y1: 70, X2: 570, Y2: 70, Width: 1}, {X1: 570, Y1: 70, X2: 570, Y2: 590, Width: 1},
+		{X1: 40, Y1: 590, X2: 570, Y2: 590, Width: 1}, {X1: 40, Y1: 70, X2: 40, Y2: 590, Width: 1},
+	}
+	doc := written(t, []Page{{Width: 612, Height: 792, Spans: []Span{span("5. Describe Event", 40, 50, 120)}, Segments: box}})["word/document.xml"]
+	if n := strings.Count(doc, "<a:lnTo>"); n != 4 || strings.Count(doc, `name="Lines `) != 1 || !strings.Contains(doc, `<a:ln w="12700">`) || strings.Contains(doc, "<w:tbl>") {
+		t.Fatalf("%d lines: %s", n, doc)
+	}
+	// One rule alone: its path frame is never 0 deep.
+	doc = written(t, []Page{{Width: 612, Height: 792, Spans: []Span{span("Form FDA-3500", 40, 750, 120)}, Segments: []Segment{{X1: 30, Y1: 763, X2: 570, Y2: 763, Width: 2}}}})["word/document.xml"]
+	if !strings.Contains(doc, `<a:path w="6858000" h="1" fill="none">`) {
+		t.Fatalf("a lone rule's path: %s", doc)
+	}
+	var grid []Segment
+	for _, y := range []float64{100, 120, 140, 160} {
+		grid = append(grid, Segment{X1: 100, Y1: y, X2: 500, Y2: y, Painted: true})
+	}
+	for _, x := range []float64{100, 300, 500} {
+		grid = append(grid, Segment{X1: x, Y1: 100, X2: x, Y2: 160, Painted: true})
+	}
+	doc = written(t, []Page{{Width: 612, Height: 792, Spans: []Span{span("1.", 80, 104, 10)}, Segments: grid}})["word/document.xml"]
+	if strings.Contains(doc, `name="Lines `) || strings.Contains(doc, "<w:tbl>") {
+		t.Fatalf("painted empty grid drawn again: %s", doc)
+	}
+}
+
+// A long document is read by several threads and written in page order,
+// each page whole; a
+// page that fails fails the document, and pages that are all scans are
+// still refused.
+func TestLongDocumentReadsInOrder(t *testing.T) {
+	opts := integrationOptions(t)
+	glyph := "600 0 0 0 600 700 d1 0 0 600 700 re f\n"
+	cmap := "/CIDInit /ProcSet findresource begin 12 dict begin begincmap /CMapName /HA def 1 begincodespacerange <00> <FF> endcodespacerange 1 beginbfchar <41> <05D0> endbfchar endcmap CMapName currentdict /CMap defineresource pop end end\n"
+	var lastInput string
+	convert := func(page func(i int) string) ([]Page, error) {
+		const n = 12
+		objects := []string{
+			"<< /Type /Catalog /Pages 2 0 R >>", "",
+			"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+			"<< /Type /Font /Subtype /Type3 /FontBBox [0 0 600 700] /FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << /A 5 0 R >> /Encoding << /Type /Encoding /Differences [65 /A] >> /FirstChar 65 /LastChar 65 /Widths [600] /ToUnicode 6 0 R >>",
+			fmt.Sprintf("<< /Length %d >>\nstream\n%sendstream", len(glyph), glyph),
+			fmt.Sprintf("<< /Length %d >>\nstream\n%sendstream", len(cmap), cmap),
+			"<< /Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Length 12 >>\nstream\n\xf0\xf0\xf0\xe0\xe0\xe0\xe0\xe0\xe0\xf0\xf0\xf0\nendstream",
+		}
+		var kids []string
+		for i := range n {
+			content := page(i)
+			kids = append(kids, fmt.Sprintf("%d 0 R", len(objects)+1))
+			objects = append(objects,
+				fmt.Sprintf("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> /XObject << /Im1 7 0 R >> >> /Contents %d 0 R >>", len(objects)+2),
+				fmt.Sprintf("<< /Length %d >>\nstream\n%sendstream", len(content), content))
+		}
+		objects[1] = fmt.Sprintf("<< /Type /Pages /Count %d /Kids [%s] >>", n, strings.Join(kids, " "))
+		input := filepath.Join(t.TempDir(), "long.pdf")
+		writePDF(t, input, objects)
+		lastInput = input
+		return Extract(context.Background(), input, opts)
+	}
+	// 150 lines a page: each page's output is past a pipe's 64 KiB, which
+	// a reader thread's non-blocking stdout wrote only in part.
+	text := func(i int) string {
+		var b strings.Builder
+		fmt.Fprintf(&b, "BT /F1 12 Tf 72 760 Td (Page %d of the long document) Tj ET\n", i+1)
+		for line := range 150 {
+			fmt.Fprintf(&b, "BT /F1 4 Tf %d %d Td (line %d of page %d, with words enough to fill it out) Tj ET\n", 72+300*(line%2), 740-4*(line/2), line, i+1)
+		}
+		return b.String()
+	}
+	pages, err := convert(text)
+	if err != nil || len(pages) != 12 {
+		t.Fatalf("%d pages: %v", len(pages), err)
+	}
+	// Read slowly, as a busy converter does: the pipe fills while the
+	// threads keep reading, and every line still arrives whole.
+	cmd := exec.Command(cmp.Or(opts.Node, "node"), "--input-type=module", "--eval", reader, filepath.Join(filepath.Dir(lastInput), "long.pdf"), opts.RectoModule, "400")
+	out, _ := cmd.StdoutPipe()
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(time.Second)
+	scanner := bufio.NewScanner(out)
+	scanner.Buffer(nil, 1<<26)
+	lines := 0
+	for ; scanner.Scan(); lines++ {
+		if !json.Valid(scanner.Bytes()) {
+			t.Fatalf("line %d is not whole JSON", lines+1)
+		}
+	}
+	if err := cmd.Wait(); err != nil || lines != 12 {
+		t.Fatalf("%d lines from a slow reader: %v", lines, err)
+	}
+	for i, p := range pages {
+		if want := fmt.Sprintf("Page %d of", i+1); len(p.Spans) == 0 || !strings.HasPrefix(p.Spans[0].Text, want) {
+			t.Fatalf("page %d reads %+v, want %q", i+1, p.Spans, want)
+		}
+	}
+	if _, err := convert(func(i int) string {
+		if i == 9 {
+			return "BT /F2 14 Tf 72 700 Td (AAAA) Tj ET\n"
+		}
+		return text(i)
+	}); err == nil || !strings.Contains(err.Error(), "page 10: bidirectional") {
+		t.Fatalf("a failing tenth page: %v", err)
+	}
+	if _, err := convert(func(int) string { return "q 612 0 0 792 0 0 cm /Im1 Do Q\n" }); err == nil || !strings.Contains(err.Error(), "every page is an image") {
+		t.Fatalf("an all-scan document: %v", err)
+	}
+}
+
+// A rule's ink comes from the page: a white frame (invisible on white) is
+// not drawn as a Word line, and a red rule stays red, 1pt thick though
+// drawn stretched to twice its length.
+func TestRulesTakeTheirInk(t *testing.T) {
+	opts := integrationOptions(t)
+	input := filepath.Join(t.TempDir(), "ink.pdf")
+	content := "1 1 1 RG 1 w 40 200 530 520 re S q 2 0 0 1 0 0 cm 1 0 0 RG 36 120 m 270 120 l S Q\nBT /F1 12 Tf 72 600 Td (Source: a health department) Tj ET BT /F1 12 Tf 72 117 Td (Total) Tj ET\n"
+	writePDF(t, input, []string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Count 1 /Kids [3 0 R] >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+		"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+		fmt.Sprintf("<< /Length %d >>\nstream\n%sendstream", len(content), content),
+	})
+	pages, err := Extract(context.Background(), input, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var red, white int
+	for _, s := range pages[0].Segments {
+		switch {
+		case s.Y1 > 600 && s.Y1 < 700 && !s.Painted:
+			red++
+			if s.Color != "ff0000" || math.Abs(s.Width-1) > 0.2 {
+				t.Errorf("red rule colored %q, %.2fpt wide", s.Color, s.Width)
+			}
+		case !s.Painted:
+			white++
+		}
+	}
+	if red != 1 || white != 0 {
+		t.Fatalf("%d red rules and %d white ones to draw, want 1 and 0: %+v", red, white, pages[0].Segments)
+	}
+}
+
+// Malayalam is measured in Kartika, the face Word sets it in: a span the
+// source sets narrower is condensed to its width, not left to run long.
+func TestComplexScriptIsFittedInItsFace(t *testing.T) {
+	text := "മലയാളം വിക്കിപീഡിയ"
+	table := func(f string) []uint16 { return faceAdvances[f] }
+	ems, _, ok := measureScript(faceAdvances["Arial"], table, text)
+	if !ok || ems == 0 {
+		t.Fatalf("Kartika measured %.2f ems, ok %v", ems, ok)
+	}
+	s := span(text, 72, 100, 0.8*ems*11)
+	s.Font = "NotoSansMalayalam-Regular"
+	scale, tracking, ok := wordFit(s, wordFamily(s), false)
+	if !ok || float64(scale)/100*ems*11+tracking*float64(len([]rune(text))-1) > 0.85*ems*11 {
+		t.Fatalf("scale %d tracking %.2f ok %v: want it condensed to 80%%", scale, tracking, ok)
+	}
+}
+
+// A span mixing scripts measures each in its own face and writes a run per
+// script: Malayalam MA in Kartika, Devanagari NA in Mangal.
+func TestMixedComplexScriptsTakeTheirOwnFaces(t *testing.T) {
+	table := func(f string) []uint16 { return faceAdvances[f] }
+	ems, _, ok := measureScript(faceAdvances["Arial"], table, "മन")
+	want := float64(advance(faceAdvances["Kartika"], 'മ')+advance(faceAdvances["Mangal"], 'न')) / 1000
+	if !ok || math.Abs(ems-want) > 1e-9 || advance(faceAdvances["Mangal"], 'न') == 0 {
+		t.Fatalf("measured %.3f ems, want %.3f", ems, want)
+	}
+	doc := written(t, []Page{{Width: 612, Height: 792, Spans: []Span{span("മന ab न", 72, 100, 60)}}})["word/document.xml"]
+	if !strings.Contains(doc, `w:cs="Kartika"/>`) || !strings.Contains(doc, `w:cs="Mangal"/>`) || !strings.Contains(doc, `>മന ab </w:t>`) {
+		t.Fatalf("runs: %s", doc)
 	}
 }

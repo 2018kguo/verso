@@ -127,6 +127,12 @@ func wordFit(s Span, family string, justified bool) (scale int, tracking float64
 		text, width = t, s.Ink
 	}
 	ems, n, ok := measure(advances, text)
+	if cs := complexScript(text); cs != "" {
+		// Word sets a complex script in its cs face (Kartika for Malayalam):
+		// measured there, a Wikipedia article's lines no longer ran wider
+		// than their source and onto eight more pages.
+		ems, n, ok = measureScript(advances, func(f string) []uint16 { return faceAdvances[face(f, s)] }, text)
+	}
 	if !ok || ems == 0 {
 		return 0, 0, false
 	}
@@ -168,6 +174,27 @@ func measure(advances []uint16, text string) (ems float64, n int, ok bool) {
 	for _, r := range text {
 		a := advance(advances, r)
 		if a == 0 {
+			return 0, 0, false
+		}
+		ems, n = ems+float64(a)/1000, n+1
+	}
+	return ems, n, true
+}
+
+// measureScript is measure with each complex-script rune taken from its
+// script's cs face (a face no table measures fails the span), where a
+// combining mark may advance nothing. Shaping (conjuncts, reordered vowel
+// signs) makes it an estimate, which errs narrow.
+func measureScript(latin []uint16, cs func(face string) []uint16, text string) (ems float64, n int, ok bool) {
+	for _, r := range text {
+		a := advance(latin, r)
+		if f := complexFace(r); f != "" {
+			table := cs(f)
+			if table == nil {
+				return 0, 0, false
+			}
+			a = advance(table, r)
+		} else if a == 0 {
 			return 0, 0, false
 		}
 		ems, n = ems+float64(a)/1000, n+1

@@ -97,7 +97,7 @@ Round trip of 22 Word documents (contracts, statements of work, reports):
 
 | Converter | Valid OOXML | Text recall | Ink F1 | ¶ recall | Pages | Median |
 |---|---|---|---|---|---|---|
-| **verso** | **20/20** (2 RTL refused) | **1.000** | **0.994** | **0.863** | 20/20 | **592 ms** |
+| **verso** | **20/20** (2 RTL refused) | **1.000** | **0.994** | **0.863** | 20/20 | **458 ms** |
 | pdf2docx 0.5.13 | 0/22 | 0.943 | 0.689 | 0.623 | 19/22 | 944 ms |
 | LibreOffice 26.2 (`soffice --convert-to docx`) | 0/22 | 0.924 | 0.350 | 0.331 | 22/22 | 2824 ms |
 
@@ -107,7 +107,7 @@ own render:
 
 | Converter | Valid OOXML | Text recall | Ink F1 | Pages | Median |
 |---|---|---|---|---|---|
-| **verso** | **21/21** | 0.996 | **0.984** | **21/21** | **419 ms** |
+| **verso** | **21/21** | 0.996 | **0.985** | **21/21** | **446 ms** |
 | pdf2docx 0.5.13 | 0/20 (1 failed) | 0.997 | 0.610 | 16/21 | 2509 ms |
 | LibreOffice | 0/21 | 1.000 | 0.177 | 21/21 | 3900 ms |
 
@@ -120,11 +120,10 @@ own render:
 - **Pages**: documents whose round trip has the source's page count.
 
 Robustness was tested on 300 PDFs sampled from a public corpus of real-world
-files (forms, filings, scans, slide decks, CJK, broken producers). 273
-convert and validate, in 301 s for all 300 (p95 2.9 s). The other 27 are
-refused with a reason: 23 are
-entirely scanned (OCR is out of scope), 2 contain right-to-left text, and 2
-are password-protected. There were no crashes and no invalid output.
+files (forms, filings, scans, slide decks, CJK, broken producers). 274
+convert and validate (p50 0.8 s, p95 2.4 s, peak memory p50 121 MiB). The
+other 26 are refused with a reason: 22 are entirely scanned (OCR is out of
+scope), 2 contain right-to-left text, and 2 are password-protected. There were no crashes and no invalid output.
 
 Reproduce with the harness in `bench/`. The Word renderer needs macOS and
 Microsoft Word; the default renderer uses LibreOffice and Poppler.
@@ -140,13 +139,17 @@ go build -o verso ./cmd/verso && go build -o verso-bench ./bench
 1. **Decode.** [Recto](https://github.com/2018kguo/recto) (Rust → WebAssembly)
    reads the PDF in a Node subprocess with a deadline and memory bound. It
    reports glyphs with positions, fonts, colours and links, plus path and
-   image boxes. Fonts that map to no text, encrypted files, all-scan
+   image boxes. Documents past 8 pages are read on 2–4 worker threads (one
+   per GiB of available memory), each with its own Recto, and pages come
+   back in order. Fonts that map to no text, encrypted files, all-scan
    documents and right-to-left text are refused with a reason.
 2. **Lines and spans.** Glyphs with the same style join a span while one
    average tracking value keeps each glyph near its source position. Spans on
    one baseline make a line; raised small text folds in as a superscript.
 3. **Tables.** Ruled segments form grids, and text is assigned to cells by
-   position. A grid that is ambiguous or too fine stays as text.
+   position. A grid that is ambiguous or too fine stays as text. Rules no
+   table rebuilds (a box around a form field, a footer rule) are drawn as
+   Word line shapes in the ink and thickness sampled from a render.
 4. **Blocks and paragraphs.** Lines group into columns. A new paragraph starts
    when:
    - the gap above a line is wider than its neighbours' gaps;

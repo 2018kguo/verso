@@ -2568,3 +2568,55 @@ func TestLargePartsDeflateInChunks(t *testing.T) {
 	}
 	t.Fatal("no document.xml")
 }
+
+// A PDF whose cross-reference table places an object the file no longer
+// holds is damaged: content may be missing, so the document is flagged for
+// review (once, on its first page). The missing object is a link on the last
+// page, so on several threads only the one reading it finds the damage.
+func TestDamagedPDFIsFlagged(t *testing.T) {
+	opts := integrationOptions(t)
+	for _, n := range []int{1, 12} {
+		objects := []string{"<< /Type /Catalog /Pages 2 0 R >>", "", "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+			"<< /Type /Annot /Subtype /Link /Rect [72 700 200 712] /A << /S /URI /URI (https://example.com/) >> >>"}
+		var kids []string
+		for i := range n {
+			content := fmt.Sprintf("BT /F1 12 Tf 72 700 Td (Page %d of a damaged file) Tj ET\n", i+1)
+			annots := ""
+			if i == n-1 {
+				annots = " /Annots [4 0 R]"
+			}
+			kids = append(kids, fmt.Sprintf("%d 0 R", len(objects)+1))
+			objects = append(objects,
+				fmt.Sprintf("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents %d 0 R%s >>", len(objects)+2, annots),
+				fmt.Sprintf("<< /Length %d >>\nstream\n%sendstream", len(content), content))
+		}
+		objects[1] = fmt.Sprintf("<< /Type /Pages /Count %d /Kids [%s] >>", n, strings.Join(kids, " "))
+		input := filepath.Join(t.TempDir(), "file.pdf")
+		writePDF(t, input, objects)
+		damaged := func(pages []Page) int {
+			count := 0
+			for _, p := range pages {
+				for _, w := range p.Warnings {
+					if strings.Contains(w, "PDF is damaged") {
+						count++
+					}
+				}
+			}
+			return count
+		}
+		pages, err := Extract(context.Background(), input, opts)
+		if err != nil || damaged(pages) != 0 {
+			t.Fatalf("%d pages, intact: %v, %d damaged warnings", n, err, damaged(pages))
+		}
+		// Blank the link's object; its xref entry still places it there.
+		data, _ := os.ReadFile(input)
+		at := bytes.Index(data, []byte("4 0 obj"))
+		end := at + bytes.Index(data[at:], []byte("endobj\n")) + len("endobj\n")
+		copy(data[at:end], bytes.Repeat([]byte(" "), end-at))
+		os.WriteFile(input, data, 0o600)
+		pages, err = Extract(context.Background(), input, opts)
+		if err != nil || len(pages) != n || damaged(pages) != 1 || damaged(pages[:1]) != 1 {
+			t.Fatalf("%d pages, link object gone: %v, %d pages, %d damaged warnings", n, err, len(pages), damaged(pages))
+		}
+	}
+}

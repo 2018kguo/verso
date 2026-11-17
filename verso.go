@@ -109,9 +109,15 @@ func Extract(ctx context.Context, path string, opts Options) ([]Page, error) {
 	}()
 	var pages []Page
 	var decodeErr error
+	damaged := false
 	for line := range lines {
 		if decodeErr != nil {
 			continue // drain: cancel() below stops the decoder
+		}
+		// The reader's last line, when Recto found objects missing or broken.
+		if bytes.Equal(line, []byte(`{"damaged":true}`)) {
+			damaged = true
+			continue
 		}
 		if len(pages) >= opts.MaxPages {
 			decodeErr = errors.New("page limit")
@@ -159,6 +165,11 @@ func Extract(ctx context.Context, path string, opts Options) ([]Page, error) {
 	}
 	if len(pages) == 0 {
 		return nil, errors.New("PDF contained no pages")
+	}
+	if damaged {
+		// Where the missing objects belonged is unknown: it is the document's
+		// warning, carried by its first page.
+		pages[0].Warnings = append(pages[0].Warnings, "the PDF is damaged: some of its objects could not be read, so content on any page may be missing")
 	}
 	return pages, nil
 }

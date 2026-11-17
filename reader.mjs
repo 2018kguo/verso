@@ -1099,6 +1099,13 @@ async function main() {
     if (scans === doc.pageCount) {
       throw new Error("scanned document: every page is an image; OCR required");
     }
+    // Damage (an object the xref places where none is) surfaces while pages
+    // read, on whichever page first touches it in a given Recto: so it is
+    // asked of every Recto once all are read, and reported for the document.
+    const all = await Promise.all(workers.map((w) => w.ask({ damaged: 1 })));
+    if (all.some((r) => r.damaged) || (!all.length && doc.damaged())) {
+      say({ damaged: true });
+    }
   } catch (error) {
     process.stderr.write(`${error?.message ?? error}\n`);
     process.exitCode = 1;
@@ -1156,7 +1163,9 @@ async function serve() {
       parentPort.postMessage(
         request.finish
           ? { out: finish(doc, request.finish) }
-          : readPage(doc, request.page)
+          : request.damaged
+            ? { damaged: doc.damaged() }
+            : readPage(doc, request.page)
       );
     } catch (error) {
       parentPort.postMessage({ error: `${error?.message ?? error}` });

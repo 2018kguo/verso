@@ -467,7 +467,11 @@ grids:
 		if len(xs) >= 2 && len(ys) >= 3 {
 			xs, openLeft, openRight = openSides(g, xs, ys)
 		}
-		if len(xs) < 3 || len(ys) < 3 {
+		// One column is a table when rules divide it into rows (a schedule
+		// boxed with only row rules) across a third of the page; a lone box
+		// is a frame, and a narrow strip of rows a drawing's (a terminal
+		// strip in a wiring diagram, which as a table ran onto a new page).
+		if len(xs) < 2 || len(ys) < 3 || len(xs) == 2 && (len(ys) < 4 || xs[1]-xs[0] < p.Width/3) {
 			continue
 		}
 		if len(xs) > 64 || len(ys) > 150 {

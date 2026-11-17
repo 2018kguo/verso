@@ -9,7 +9,7 @@ const doc = await openPdf(new Uint8Array(fs.readFileSync(file))).catch(
   (error) => {
     process.stderr.write(`${error?.message ?? error}\n`); // e.g. needs a password
     process.exit(1);
-  }
+  },
 );
 const say = (value) => {
   fs.writeSync(1, JSON.stringify(value)); // not concatenated: pages run to megabytes
@@ -130,6 +130,59 @@ function weight(font) {
   const named =
     /bold/i.test(style) && !/semi|demi|extra|ultra/i.test(style) ? 700 : 400;
   return Math.max(font?.weight ?? 400, named);
+}
+
+// hidden reports whether a page's text is an OCR layer it does not show
+// (rendering mode 3, or painted over by its scan): Word drew it over the scan,
+// doubled, and the extra text ran onto pages of its own. A glyph is hidden
+// when rendering the page without text changes none of its box's pixels; the
+// layer is hidden when nine in ten of its glyphs are, as one thin "." at this
+// resolution can look. Only pages with a large image are checked (two renders).
+function hidden(pdf, pageIndex, info, text, images) {
+  let big = false;
+  for (let i = 0; i < images.count; i++) {
+    big ||=
+      images.boxes[4 * i + 2] * images.boxes[4 * i + 3] >
+      0.25 * info.width * info.height;
+  }
+  if (!big || !text.count) {
+    return false;
+  }
+  const options = { width: 400, maxHeight: 2048 };
+  const shown = pdf.render(pageIndex, { ...options, text: true });
+  const bare = pdf.render(pageIndex, { ...options, text: false });
+  const sx = shown.width / info.width;
+  const sy = shown.height / info.height;
+  let ink = 0;
+  let unseen = 0;
+  for (let i = 0; i < text.count; i++) {
+    if (!String.fromCodePoint(text.codepoints[i]).trim()) {
+      continue;
+    }
+    const x0 = Math.max(0, Math.floor(text.boxes[4 * i] * sx));
+    const y0 = Math.max(0, Math.floor(text.boxes[4 * i + 1] * sy));
+    const x1 = Math.min(
+      shown.width,
+      Math.ceil((text.boxes[4 * i] + text.boxes[4 * i + 2]) * sx),
+    );
+    const y1 = Math.min(
+      shown.height,
+      Math.ceil((text.boxes[4 * i + 1] + text.boxes[4 * i + 3]) * sy),
+    );
+    let same = true;
+    for (let y = y0; same && y < y1; y++) {
+      const end = (y * shown.width + x1) * 4;
+      for (let k = (y * shown.width + x0) * 4; k < end; k++) {
+        if (Math.abs(shown.rgba[k] - bare.rgba[k]) > 24) {
+          same = false;
+          break;
+        }
+      }
+    }
+    ink++;
+    unseen += same ? 1 : 0;
+  }
+  return ink > 0 && unseen >= 0.9 * ink;
 }
 
 function clip(info, b) {
@@ -270,7 +323,7 @@ try {
     const tilted = (angle) => {
       const a = Math.atan2(
         Math.sin(angle - rotation),
-        Math.cos(angle - rotation)
+        Math.cos(angle - rotation),
       );
       return Math.abs(a) > 0.01;
     };
@@ -294,7 +347,8 @@ try {
     const raster = [];
     let droppedLinks = 0;
     let last;
-    for (let i = 0; i < text.count; i++) {
+    const ocr = hidden(doc, pageIndex, info, text, objects.images);
+    for (let i = 0; i < (ocr ? 0 : text.count); i++) {
       const tilt = tilted(text.angles[i]);
       if (
         text.flags[i] & 2 ||
@@ -321,7 +375,7 @@ try {
       }
       if (/[\u0590-\u08ff\u202a-\u202e\u2066-\u2069]/u.test(value)) {
         throw new Error(
-          `page ${pageIndex + 1}: bidirectional text needs manual review`
+          `page ${pageIndex + 1}: bidirectional text needs manual review`,
         );
       }
       if (value === "\n" || value === "\r") {
@@ -338,6 +392,18 @@ try {
         continue;
       }
       const run = text.runIds[i];
+      // A nonspacing mark (a Thai tone mark, a Devanagari vowel sign above)
+      // drawn on the glyph before it is part of that glyph: split off, Word
+      // drew it alone on a dotted circle and broke the run in two.
+      if (
+        last &&
+        /^\p{Mn}+$/u.test(value) &&
+        boxX >= last.x - 0.5 &&
+        boxX < last.x + last.width
+      ) {
+        last.text += value;
+        continue;
+      }
       // A ligature's letters ("f", "i" of "ﬁ") share one glyph's box: one
       // glyph, its text both letters.
       if (
@@ -372,7 +438,7 @@ try {
             x + width / 2 >= box.x &&
             x + width / 2 <= box.x + box.width &&
             y + height / 2 >= box.y &&
-            y + height / 2 <= box.y + box.height
+            y + height / 2 <= box.y + box.height,
         )?.target;
       let link = "";
       if (target?.kind === "uri") {
@@ -509,7 +575,7 @@ try {
     for (let i = 0; i < pathCount; i++) {
       const [, , pathWidth, pathHeight] = objects.paths.boxes.subarray(
         i * 4,
-        i * 4 + 4
+        i * 4 + 4,
       );
       // Filled backgrounds are not table borders. Thin filled rectangles are.
       if (
@@ -532,7 +598,7 @@ try {
       };
       for (let j = begin; j < end; j++) {
         const point = Array.from(
-          objects.segments.points.subarray(2 * j, 2 * j + 2)
+          objects.segments.points.subarray(2 * j, 2 * j + 2),
         );
         const kind = objects.segments.kinds[j];
         if ((kind & 3) === 2) {
@@ -557,7 +623,7 @@ try {
     for (let i = 0; i < objects.images.count; i++) {
       const [x, y, width, height] = objects.images.boxes.subarray(
         4 * i,
-        4 * i + 4
+        4 * i + 4,
       );
       if (width > 0 && height > 0) {
         placed.push({ x, y, width, height });
@@ -576,7 +642,7 @@ try {
             x >= k.x - 1 &&
             y >= k.y - 1 &&
             x + width <= k.x + k.width + 1 &&
-            y + height <= k.y + k.height + 1
+            y + height <= k.y + k.height + 1,
         )
       ) {
         continue;
@@ -600,7 +666,7 @@ try {
             (s.x >= b.x - 1 &&
               s.y >= b.y - 1 &&
               s.x + s.width <= b.x + b.width + 1 &&
-              s.y + s.height <= b.y + b.height + 1)
+              s.y + s.height <= b.y + b.height + 1),
         ));
     let dense = false;
     const boxes = Array.from({ length: pathCount }, (_, i) => {
@@ -621,11 +687,12 @@ try {
         thick,
       };
     }).filter((b) => !backdrop(b));
-    let art = clusters(boxes, 2) ?? ((dense = true), []);
-    // Past the path limit (a map of 20,000 dots) the drawings are too many to
-    // place one by one: the area they cover is kept as one image, drawn
-    // without the page's text, rather than left out.
-    if (pathCount < objects.paths.count) {
+    // Past the path limit (a map of 20,000 dots), or too dense to cluster
+    // (an engineering drawing), the drawings are too many to place one by
+    // one: the area they cover is kept as one image, drawn without the
+    // page's text, rather than left out.
+    let art = pathCount < objects.paths.count ? null : clusters(boxes, 2);
+    if (!art) {
       let union;
       for (let i = 0; i < objects.paths.count; i++) {
         const [x0, y0, w0, h0] = objects.paths.boxes.subarray(4 * i, 4 * i + 4);
@@ -653,7 +720,7 @@ try {
         (s) =>
           s.text.trim() &&
           Math.min(s.x + s.width, b.x + b.width) > Math.max(s.x, b.x) &&
-          Math.min(s.y + s.height, b.y + b.height) > Math.max(s.y, b.y)
+          Math.min(s.y + s.height, b.y + b.height) > Math.max(s.y, b.y),
       );
     let skippedArt = false;
     const drawn = (list) => list.filter((b) => b.thick || !underText(b));
@@ -686,22 +753,22 @@ try {
     const warnings = [];
     if (crowded) {
       warnings.push(
-        "Page too complex to keep every image and drawing: the smallest were left out"
+        "Page too complex to keep every image and drawing: the smallest were left out",
       );
     }
     if (raster.length) {
       warnings.push(
-        `${raster.length} rotated or unmapped characters kept as images, not editable text`
+        `${raster.length} rotated or unmapped characters kept as images, not editable text`,
       );
     }
     if (droppedLinks) {
       warnings.push(
-        "Links other than web, mail and page links keep their text without the link"
+        "Links other than web, mail and page links keep their text without the link",
       );
     }
     if (
       spans.some((s) =>
-        /[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/u.test(s.text)
+        /[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/u.test(s.text),
       )
     ) {
       warnings.push("CJK text and font fidelity require manual review");
@@ -710,24 +777,37 @@ try {
     // its look as an image: without the page's text, unless the appearance
     // draws text of its own.
     const shown = annotations.filter(
-      (a) => a.subtype !== 2 && a.appearanceObjects > 0
+      (a) => a.subtype !== 2 && a.appearanceObjects > 0,
     );
     for (const a of shown.slice(0, Math.max(0, 100 - images.length))) {
       addImage(a.box, a.appearanceTextObjects > 0);
     }
     if (annotations.some((a) => a.subtype !== 2)) {
       warnings.push(
-        "PDF annotations and form fields are kept as images, not Word comments or fields"
+        "PDF annotations and form fields are kept as images, not Word comments or fields",
       );
     }
-    if (objects.images.count && !spans.some((s) => s.text.trim())) {
+    if (
+      objects.images.count &&
+      !raster.length &&
+      !spans.some((s) => s.text.trim())
+    ) {
       // A scan in a document with text keeps its look; all scans is a refusal.
+      // Not a page of unmapped characters: their images carry its text, and a
+      // page image renders without it (a printed web article came out blank).
+      // A scan with a hidden OCR layer keeps its look too, and counts as text.
       images.splice(0);
       addImage({ x: 0, y: 0, width: info.width, height: info.height });
-      warnings.push(
-        "Scanned page kept as an image: no editable text without OCR"
-      );
-      scans++;
+      if (ocr) {
+        warnings.push(
+          "Scanned page kept as an image: its hidden OCR text is not editable text",
+        );
+      } else {
+        warnings.push(
+          "Scanned page kept as an image: no editable text without OCR",
+        );
+        scans++;
+      }
     }
     const page = { info, pageIndex, spans, segments, images, warnings };
     if (scans === pageIndex + 1) {

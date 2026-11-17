@@ -686,6 +686,7 @@ func write(ctx context.Context, dst io.Writer, pages []Page) (report Report, err
 	w := writer{files: map[string][]byte{}, fonts: map[string]Span{}}
 	w.body.WriteString(declaration + `<w:document xmlns:w="` + word + `" xmlns:r="` + relationships + `" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><w:body>`)
 	w.rels.WriteString(declaration + `<Relationships xmlns="` + packageRelationships + `">`)
+	serifByWidth(pages)
 	margins, body, firstNumber := w.margins(pages)
 	for i, p := range body {
 		if err := ctx.Err(); err != nil {

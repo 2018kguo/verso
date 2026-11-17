@@ -34,8 +34,9 @@ func wordFamily(s Span) string {
 	family := fontName(s.Font)
 	// Word draws a symbol font only at its private-use codes (U+F020–F0FF):
 	// a bullet decoded to "•" in Symbol came out blank. Real Unicode goes to
-	// a text face.
-	if symbolFonts[fontKey(family)] && strings.ContainsFunc(s.Text, func(r rune) bool { return r < 0xF000 || r > 0xF0FF }) {
+	// a text face. Spaces are neither: a bullet's trailing space sent it to
+	// Arial, which draws U+F0B7 blank.
+	if symbolFonts[fontKey(family)] && strings.ContainsFunc(s.Text, func(r rune) bool { return r != ' ' && (r < 0xF000 || r > 0xF0FF) }) {
 		family = ""
 	}
 	if officeFonts[fontKey(family)] {
@@ -55,6 +56,47 @@ func wordFamily(s Span) string {
 		return "Times New Roman"
 	}
 	return "Arial"
+}
+
+// serifByWidth sets Serif on the spans of each font Word lacks and neither
+// flags nor name class, when Times New Roman's widths fit its text clearly
+// better than Arial's: Elsevier's "AdvOT1ef757c0" carries no serif flag, and
+// set in Arial an article ran a page long. It changes pages in place.
+func serifByWidth(pages []Page) {
+	type misfit struct{ arial, times float64 }
+	fonts := map[string]*misfit{}
+	for _, p := range pages {
+		for _, s := range p.Spans {
+			text := strings.TrimRight(s.Text, " ")
+			if s.Serif || s.Mono || len(text) < 4 || s.Size <= 0 || wordFamily(s) != "Arial" || officeFonts[fontKey(fontName(s.Font))] {
+				continue
+			}
+			a, n, okA := measure(faceAdvances[face("Arial", s)], text)
+			t, _, okT := measure(faceAdvances[face("Times New Roman", s)], text)
+			width := s.Width
+			if s.Ink > 0 && s.Ink <= s.Width {
+				width = s.Ink
+			}
+			source := width - float64(n-1)*s.Tracking
+			if !okA || !okT || a == 0 || t == 0 || source <= 0 {
+				continue
+			}
+			m := fonts[s.Font]
+			if m == nil {
+				m = &misfit{}
+				fonts[s.Font] = m
+			}
+			m.arial += math.Abs(math.Log(source/(a*s.Size))) * float64(n)
+			m.times += math.Abs(math.Log(source/(t*s.Size))) * float64(n)
+		}
+	}
+	for i := range pages {
+		for j := range pages[i].Spans {
+			if m := fonts[pages[i].Spans[j].Font]; m != nil && m.times < 0.7*m.arial {
+				pages[i].Spans[j].Serif = true
+			}
+		}
+	}
 }
 
 // Embedded Type 1 fonts often leave the serif flag unset (TeX's Computer

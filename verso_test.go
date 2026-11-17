@@ -1905,9 +1905,10 @@ func TestHugeHorizontalScaleConverts(t *testing.T) {
 
 // A bullet the PDF draws from Symbol but decodes to "•" is blank in Word's
 // Symbol (it draws only private-use codes): it is written in a text face. A
-// private-use Wingdings bullet keeps its font.
+// private-use Wingdings bullet keeps its font, a space after it included.
 func TestSymbolFontUnicodeBulletGetsATextFace(t *testing.T) {
-	bullet, wing := span("\u2022", 72, 100, 4), span("\uF0A7", 72, 120, 4)
+	// The PDF often draws a bullet's space in its font too: "\uF0A7 ".
+	bullet, wing := span("\u2022", 72, 100, 4), span("\uF0A7 ", 72, 120, 4)
 	bullet.Font, wing.Font = "SymbolMT", "Wingdings-Regular"
 	if got := wordFamily(bullet); got == "Symbol" {
 		t.Fatalf("a Unicode bullet stays in Symbol, which Word draws blank")
@@ -2175,5 +2176,59 @@ func TestGlyphAdvancesToAnOverlappingNext(t *testing.T) {
 	}
 	if spans := pages[0].Spans; len(spans) != 1 || spans[0].Text != "To" || math.Abs(spans[0].Width-(0.611+0.556-0.3)*20) > 0.2 {
 		t.Fatalf("spans %+v: want one span To, as wide as its kerned advances", spans)
+	}
+}
+
+// A scan's OCR layer the page does not show (rendering mode 3) is not drawn
+// over the scan: Word showed it doubled. The page keeps its scan's look and,
+// with an OCR layer, is not refused as a scan.
+func TestHiddenOCRLayerKeepsTheScan(t *testing.T) {
+	opts := integrationOptions(t)
+	input := filepath.Join(t.TempDir(), "ocr.pdf")
+	content := "q 612 0 0 792 0 0 cm /Im1 Do Q BT /F1 12 Tf 3 Tr 72 700 Td (Scanned words under the image) Tj ET\n"
+	writePDF(t, input, []string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Count 1 /Kids [3 0 R] >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> /XObject << /Im1 6 0 R >> >> /Contents 5 0 R >>",
+		"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+		fmt.Sprintf("<< /Length %d >>\nstream\n%sendstream", len(content), content),
+		"<< /Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Length 12 >>\nstream\n\xf0\xf0\xf0\xe0\xe0\xe0\xe0\xe0\xe0\xf0\xf0\xf0\nendstream",
+	})
+	pages, err := Extract(context.Background(), input, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p := pages[0]; len(p.Spans) != 0 || len(p.Images) != 1 || p.Images[0].Width < 600 {
+		t.Fatalf("spans %d images %+v: want the scan alone", len(p.Spans), p.Images)
+	}
+}
+
+// Rows ruled inside a box with no column rules are a one-column table: its
+// rules were lost with the grid. A lone box stays a frame, and a narrow
+// strip of rows a drawing's.
+func TestOneColumnRuledRowsAreATable(t *testing.T) {
+	var segs []Segment
+	for _, y := range []float64{100, 120, 140, 160} {
+		segs = append(segs, Segment{X1: 72, Y1: y, X2: 540, Y2: y})
+	}
+	segs = append(segs, Segment{X1: 72, Y1: 100, X2: 72, Y2: 160}, Segment{X1: 540, Y1: 100, X2: 540, Y2: 160})
+	spans := []Span{span("KB 8.hod CJL", 80, 114, 60), span("QA 3.hod ZEM", 80, 134, 60), span("SXA 6.hod ANJ", 80, 154, 60)}
+	if doc := written(t, []Page{{Width: 612, Height: 792, Spans: spans, Segments: segs}})["word/document.xml"]; !strings.Contains(doc, "<w:tbl>") {
+		t.Fatalf("no table: %s", doc)
+	}
+	var strip []Segment // a wiring diagram's terminal strip
+	for _, g := range segs {
+		g.X2 = math.Min(g.X2, 112)
+		if g.X1 == 540 {
+			g.X1, g.X2 = 112, 112
+		}
+		strip = append(strip, g)
+	}
+	if doc := written(t, []Page{{Width: 612, Height: 792, Spans: []Span{span("TB1", 80, 114, 20)}, Segments: strip}})["word/document.xml"]; strings.Contains(doc, "<w:tbl>") {
+		t.Fatalf("a narrow strip of rows became a table: %s", doc)
+	}
+	box := []Segment{segs[0], segs[3], segs[4], segs[5]}
+	if doc := written(t, []Page{{Width: 612, Height: 792, Spans: spans[:1], Segments: box}})["word/document.xml"]; strings.Contains(doc, "<w:tbl>") {
+		t.Fatalf("a lone box became a table: %s", doc)
 	}
 }
